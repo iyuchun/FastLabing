@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FastLabing · 视频标注台</title>
+<link rel="stylesheet" href="style.css?v=20261122-8">
+</head>
+<body>
+<script src="assets/sprite.js?v=20261122-5"></script>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round">
+          <path d="M3.5 8V6a2.5 2.5 0 0 1 2.5-2.5h2M16 3.5h2.5A2.5 2.5 0 0 1 21 6v2M20.5 16v2a2.5 2.5 0 0 1-2.5 2.5h-2M8 20.5H5.5A2.5 2.5 0 0 1 3 18v-2"/>
+        </svg>
+      </span>
+      <span class="brand-word"><b>FastLabing</b><small>FRAME NOTES</small></span>
+    </div>
+
+    <div class="crumbs">
+      <span>数据集</span>
+      <svg class="ic" aria-hidden="true"><use href="#i-chevron-right"></use></svg>
+      <b id="crumbTitle">未导入</b>
+      <span class="crumb-sub" id="crumbSub">本地标注项目</span>
+    </div>
+
+    <nav class="steps" aria-label="工作流程">
+      <span class="step" id="stepImport"><span class="n">01</span>导入</span>
+      <span class="step active"><span class="n">02</span>标注</span>
+      <span class="step" id="stepExport"><span class="n">03</span>导出</span>
+    </nav>
+
+    <div class="top-actions">
+      <span class="save-state" id="saveStateWrap"><span class="status-dot"></span><span id="saveState">已保存</span></span>
+      <input type="file" id="fileInput" accept=".mp4,video/mp4" hidden>
+      <button id="btnProjects" class="btn ghost" type="button" title="查看并切换所有项目">
+        <svg class="ic" aria-hidden="true"><use href="#i-layers"></use></svg>项目
+      </button>
+      <button id="btnImport" class="btn ghost" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg>导入视频
+      </button>
+      <button id="btnExport" class="btn primary" type="button" disabled>
+        <svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg>导出数据集
+      </button>
+    </div>
+  </header>
+
+  <div class="workbar">
+    <div class="workbar-left">
+      <span class="workbar-label">新建框 ID</span>
+      <div class="seg idmode" id="idMode" aria-label="新建框 ID 模式">
+        <button class="seg-btn active" type="button" data-mode="auto" title="新框 ID = 当前最大 ID + 1">自动 +1</button>
+        <button class="seg-btn" type="button" data-mode="prev" title="新框 ID 沿用上一帧最后一个框的 ID">沿用上一帧</button>
+      </div>
+      <span class="vrule"></span>
+      <button id="btnUndo" class="linkbtn" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#i-undo-2"></use></svg>撤销 <kbd>Ctrl Z</kbd>
+      </button>
+      <span class="vrule"></span>
+      <label class="checkline">目标 FPS
+        <select id="fpsSelect" class="mini-select">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="5">5</option>
+          <option value="10" selected>10</option>
+          <option value="15">15</option>
+          <option value="24">24</option>
+          <option value="30">30</option>
+        </select>
+      </label>
+      <button id="btnExtract" class="linkbtn" type="button" disabled>
+        <svg class="ic" aria-hidden="true"><use href="#i-film"></use></svg>分帧
+      </button>
+      <span class="vrule"></span>
+      <label class="checkline">类别名
+        <input id="categoryName" class="mini-input" value="object" spellcheck="false">
+      </label>
+    </div>
+    <div class="workbar-right">
+      <span class="restored" id="status">等待导入视频</span>
+    </div>
+  </div>
+
+  <main class="workspace">
+    <section class="stage-column" aria-label="视频标注区">
+      <div class="stage-head">
+        <div>
+          <div class="stage-title">
+            <h1 id="stageTitle">视频标注</h1>
+            <span class="slash">/</span>
+            <span class="sub" id="stageSub">本地项目</span>
+          </div>
+          <div class="stage-meta">
+            <span id="metaFrames">0 帧</span><i></i>
+            <span id="metaFps">— fps</span><i></i>
+            <span id="metaSize">—</span><i></i>
+            <span id="metaAnnotated">已标注 0 帧</span>
+          </div>
+        </div>
+        <div class="stage-tools">
+          <span id="serverStatus" class="server-status">检查服务…</span>
+        </div>
+      </div>
+
+      <div class="video-card">
+        <div class="video-stage canvas-wrap" id="canvasWrap">
+          <canvas id="canvas"></canvas>
+          <div class="empty" id="canvasEmpty">请先导入视频并点击「分帧」</div>
+          <div class="stage-hud">
+            <span class="hud-rec"><i></i>ANNOTATION</span>
+            <span class="hud-frame">FRAME <span id="hudFrame">0000</span> / <span id="hudTotal">0000</span></span>
+          </div>
+        </div>
+
+        <div class="transport">
+          <div class="transport-btns">
+            <button class="icon-btn-dark" id="btnPrev" type="button" aria-label="上一帧">
+              <svg class="ic" aria-hidden="true"><use href="#i-chevron-left"></use></svg>
+            </button>
+            <button class="icon-btn-dark" id="btnNext" type="button" aria-label="下一帧">
+              <svg class="ic" aria-hidden="true"><use href="#i-chevron-right"></use></svg>
+            </button>
+          </div>
+          <div class="frame-jump">
+            <input id="frameIndex" type="number" min="1" value="1" aria-label="跳转到帧">
+            <span id="frameCountLabel">/ 0</span>
+          </div>
+          <div class="scrub" id="scrub" role="slider" aria-label="帧进度" aria-valuemin="1" aria-valuenow="1">
+            <div class="scrub-track">
+              <div class="scrub-fill" id="scrubFill"></div>
+              <div class="scrub-handle" id="scrubHandle"></div>
+            </div>
+          </div>
+          <div class="transport-meta">
+            <svg class="ic" aria-hidden="true"><use href="#i-check"></use></svg>
+            <span><b id="annotatedCount">0</b> 帧已标注</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="film-card">
+        <div class="film-head">
+          <div class="film-title">
+            <svg class="ic" aria-hidden="true"><use href="#i-film"></use></svg>
+            帧序列
+          </div>
+          <div class="film-note">
+            <span id="filmNote">0 帧</span><i></i><span>当前帧居中 · 滚轮左右滑动</span>
+          </div>
+        </div>
+        <div class="filmstrip" id="thumbStrip" aria-label="帧缩略图序列"></div>
+      </div>
+    </section>
+
+    <aside class="inspector" aria-label="检查器">
+      <div class="inspector-inner">
+        <div class="inspector-head">
+          <div>
+            <h2>检查器</h2>
+            <p>帧 <span id="inspectorFrame">0</span> / <span id="inspectorTotal">0</span> · 自动保存</p>
+          </div>
+        </div>
+
+        <section class="ins-section">
+          <div class="ins-head">
+            <span class="eyebrow">当前帧</span>
+            <span class="badge" id="frameBadge">0 个对象</span>
+          </div>
+          <div class="frame-big">
+            <span class="num" id="frameBigNo">0001</span>
+            <span class="of">/ <span id="frameBigTotal">0</span></span>
+            <span class="tc" id="timecode">00:00:00:00</span>
+          </div>
+          <div class="frame-nav">
+            <button id="btnPrevFrame" type="button"><svg class="ic" aria-hidden="true"><use href="#i-chevron-left"></use></svg>上一帧</button>
+            <button id="btnNextFrame" type="button">下一帧<svg class="ic" aria-hidden="true"><use href="#i-chevron-right"></use></svg></button>
+          </div>
+        </section>
+
+        <section class="ins-section">
+          <div class="ins-head">
+            <span class="eyebrow">当前帧标注框</span>
+            <span class="ins-head-tools">
+              <label class="checkline mini" title="全选当前帧所有框">
+                <input type="checkbox" id="boxSelectAll">全选
+              </label>
+              <button id="btnToggleAllVisible" class="linkbtn" type="button" disabled>
+                <svg class="ic" aria-hidden="true"><use href="#i-eye-off"></use></svg>全部隐藏
+              </button>
+              <button id="btnDeleteChecked" class="linkbtn danger" type="button" disabled>删除选中</button>
+            </span>
+          </div>
+          <div id="boxList" class="boxlist"></div>
+        </section>
+
+        <section class="ins-section" id="selectedPanel" hidden>
+          <div class="ins-head">
+            <span class="eyebrow">选中框</span>
+            <span class="badge" id="selectedHint">可拖动 / 缩放</span>
+          </div>
+          <div class="selected-row">
+            <label class="inline-field">框 ID
+              <input type="number" id="selectedId" min="1">
+            </label>
+            <button id="btnApplyId" class="btn ghost small" type="button">改 ID</button>
+            <button id="btnDeleteSelected" class="btn ghost small danger" type="button">删除</button>
+          </div>
+        </section>
+
+        <section class="ins-section manage-entry">
+          <button id="btnManage" class="manage-btn" type="button">
+            <svg class="ic" aria-hidden="true"><use href="#i-layers"></use></svg>
+            <span>批量管理</span>
+            <small>改 ID · 删除 · 新增</small>
+          </button>
+        </section>
+
+        <section class="ins-section auto-panel" id="autoPanel">
+          <div class="ins-head">
+            <span class="eyebrow">AI 自动打标</span>
+            <span class="badge" id="autoCapBadge">检测中</span>
+          </div>
+          <p class="hint" id="autoHint">SAM 3 文本提示自动检出并跟踪画面中所有人物，结果写入当前项目，完成后可直接人工微调。</p>
+          <button id="btnAuto" class="auto-btn" type="button" disabled title="正在检测自动打标环境…">
+            <svg class="ic" aria-hidden="true"><use href="#i-target"></use></svg>
+            <span>AI 自动打标 · 一键识别全身人物</span>
+          </button>
+        </section>
+
+        <section class="ins-section track-panel">
+          <div class="ins-head">
+            <span class="eyebrow">智能跟踪</span>
+            <span class="badge" id="trackModelBadge">SAM 3</span>
+          </div>
+          <p class="hint" id="trackHint">勾选一个或多个框作为种子，只补空缺帧；已有同 ID 的帧自动跳过、不覆盖。</p>
+          <div class="range-row">
+            <span>跟踪模型</span>
+            <div class="seg" id="modelMode">
+              <button class="seg-btn active" type="button" data-model="sam3" title="精度更高，8G 显存下速度较慢">SAM 3</button>
+              <button class="seg-btn" type="button" data-model="sam2" title="速度约为 SAM3 的数十倍，显存占用约 1GB">SAM 2.1</button>
+            </div>
+          </div>
+          <div class="range-row" id="precisionRow">
+            <span>跟踪精度</span>
+            <select id="trackPrecision" class="mini-select">
+              <option value="high">精细 · 逐帧</option>
+              <option value="fast">快速 · 隔 1 帧插值</option>
+              <option value="turbo">极速 · 隔 2 帧插值</option>
+            </select>
+          </div>
+          <div class="range-row">
+            <span>跟踪帧数</span>
+            <div class="stepper">
+              <button type="button" id="trackMinus" aria-label="减少跟踪帧数">−</button>
+              <input type="number" id="trackCount" min="1" max="300" value="30">
+              <button type="button" id="trackPlus" aria-label="增加跟踪帧数">+</button>
+            </div>
+          </div>
+          <label class="checkline"><input type="checkbox" id="trackFill" checked>缺失帧沿用上一帧框</label>
+          <div class="track-progress"><i id="trackProgress"></i></div>
+          <div class="track-status">
+            <span id="trackStatus">就绪</span>
+          </div>
+          <button id="btnTrack" class="track-btn" type="button">
+            <svg class="ic" aria-hidden="true"><use href="#i-target"></use></svg>
+            <span>用选中框跟踪</span>
+          </button>
+        </section>
+
+        <section class="ins-section">
+          <div class="ins-head">
+            <span class="eyebrow">数据集</span>
+            <span class="badge" id="datasetPct">0%</span>
+          </div>
+          <div class="dataset-bar"><i id="datasetBar"></i></div>
+          <div class="dataset-meta">
+            <span id="datasetDone">已完成 0 帧</span>
+            <span id="datasetRest">剩余 0 帧</span>
+          </div>
+        </section>
+
+        <section class="ins-section gpu-panel" id="gpuPanel">
+          <div class="ins-head">
+            <span class="eyebrow">GPU 监控</span>
+            <span class="badge blue" id="gpuBadge">检测中</span>
+          </div>
+          <div class="gpu-name" id="gpuName">正在读取 nvidia-smi…</div>
+          <div class="gpu-grid">
+            <div class="gpu-stat"><span>利用率</span><b id="gpuUtil">—</b></div>
+            <div class="gpu-stat"><span>显存</span><b id="gpuMem">—</b></div>
+            <div class="gpu-stat"><span>温度</span><b id="gpuTemp">—</b></div>
+          </div>
+          <div class="gpu-bar"><i id="gpuBar"></i></div>
+        </section>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <div class="status-left">
+      <span class="status-item"><svg class="ic" aria-hidden="true"><use href="#i-frame"></use></svg><span class="mono" id="statusSize">0 × 0</span></span>
+      <span class="status-item"><svg class="ic" aria-hidden="true"><use href="#i-crosshair"></use></svg><span class="mono" id="cursorXY">x —  y —</span></span>
+      <span class="status-item" id="statusProject">未加载项目</span>
+      <button class="status-item status-path" id="statusFolder" type="button" disabled>
+        <svg class="ic" aria-hidden="true"><use href="#i-folder"></use></svg>
+        <span id="statusFolderText">未加载项目目录</span>
+      </button>
+    </div>
+    <div class="status-right">
+      <span class="status-item"><span class="status-dot"></span>本地服务</span>
+      <div class="keys">
+        <span class="key-hint"><kbd>Ctrl Z</kbd>撤销</span>
+        <span class="key-hint"><kbd>← →</kbd>逐帧</span>
+        <span class="key-hint"><kbd>Del</kbd>删除框</span>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<div class="modal" id="autoModal" hidden>
+  <div class="modal-box auto">
+    <div class="manage-head">
+      <div>
+        <h3>AI 自动打标</h3>
+        <p class="modal-sub">按提示词自动检出目标并跨帧分配追踪 ID</p>
+      </div>
+      <button id="autoClose" class="btn ghost small" type="button">关闭</button>
+    </div>
+
+    <div id="autoParamsPane">
+      <div class="auto-form">
+        <label class="auto-field">提示词
+          <input id="autoPrompt" class="auto-input" value="person" placeholder="person（英文提示词效果最好）" spellcheck="false">
+        </label>
+        <div class="auto-row">
+          <span class="auto-label">置信度</span>
+          <input id="autoScore" class="auto-range" type="range" min="0.1" max="0.9" step="0.05" value="0.5">
+          <span id="autoScoreVal" class="auto-val mono">0.50</span>
+        </div>
+        <div class="auto-row">
+          <span class="auto-label">最小框面积</span>
+          <div class="auto-num-wrap">
+            <input id="autoMinArea" class="auto-num" type="number" min="0.001" max="10" step="0.001" value="0.05">
+            <span class="auto-unit">%</span>
+          </div>
+          <span class="auto-tip">过滤远处小目标</span>
+        </div>
+        <div class="auto-row">
+          <span class="auto-label">覆盖方式</span>
+          <select id="autoMode" class="mini-select auto-select">
+            <option value="replace" selected>覆盖全部帧（推荐）</option>
+            <option value="fill">只填空缺帧</option>
+            <option value="append">追加到已有标注</option>
+          </select>
+        </div>
+        <div class="auto-row">
+          <span class="auto-label">帧范围</span>
+          <select id="autoRange" class="mini-select auto-select">
+            <option value="all" selected>全部帧</option>
+            <option value="current">从当前帧到结尾</option>
+          </select>
+        </div>
+      </div>
+      <p class="auto-msg" id="autoMsg"></p>
+      <div class="auto-actions">
+        <button id="btnAutoCloseParams" class="btn ghost" type="button">关闭</button>
+        <button id="btnAutoStart" class="btn primary" type="button">
+          <svg class="ic" aria-hidden="true"><use href="#i-target"></use></svg>开始自动打标
+        </button>
+      </div>
+    </div>
+
+    <div id="autoRunPane" hidden>
+      <div class="track-progress auto-progress"><i id="autoProgress"></i></div>
+      <div class="auto-run-meta">
+        <span id="autoStatus" class="auto-run-status">正在提交任务…</span>
+        <span id="autoProgressText" class="mono">0 / 0 帧</span>
+      </div>
+      <div class="auto-stats">
+        <div class="auto-stat"><span>已发现目标</span><b id="autoFound">0</b></div>
+        <div class="auto-stat"><span>当前提示词</span><b id="autoRunPrompt">person</b></div>
+      </div>
+      <div class="auto-actions">
+        <button id="btnAutoCancel" class="btn ghost danger" type="button">取消</button>
+      </div>
+    </div>
+
+    <div id="autoResultPane" hidden>
+      <div class="auto-result-title" id="autoResultTitle">打标完成</div>
+      <p class="auto-msg" id="autoResultMsg"></p>
+      <div class="auto-stats" id="autoResultStats">
+        <div class="auto-stat"><span>处理帧数</span><b id="autoResultFrames">—</b></div>
+        <div class="auto-stat"><span>总框数</span><b id="autoResultBoxes">—</b></div>
+        <div class="auto-stat"><span>跟踪目标数</span><b id="autoResultObjects">—</b></div>
+      </div>
+      <div class="auto-actions">
+        <button id="btnAutoRetry" class="btn ghost" type="button">再次运行</button>
+        <button id="btnAutoView" class="btn primary" type="button">关闭并查看</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="manageModal" hidden>
+  <div class="modal-box manage">
+    <div class="manage-head">
+      <div>
+        <h3>框批量管理</h3>
+        <p class="modal-sub">按范围改 ID、删除、新增与清理，所有操作可 Ctrl+Z 撤销</p>
+      </div>
+      <button id="manageClose" class="btn ghost small" type="button">关闭</button>
+    </div>
+    <div class="tabs">
+      <button class="btn small active" type="button" data-tab="frame" id="tabFrame">当前帧（第 <span id="manageFrameNo">1</span> 帧）</button>
+      <button class="btn small" type="button" data-tab="ids" id="tabIds">全部 ID</button>
+    </div>
+
+    <div id="manageFramePane">
+      <div class="table-wrap">
+        <table class="mt">
+          <thead>
+            <tr>
+              <th><input type="checkbox" id="frameAll" title="全选/全不选"></th>
+              <th>ID</th><th>X</th><th>Y</th><th>宽</th><th>高</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="manageFrameBody"></tbody>
+        </table>
+      </div>
+      <div class="manage-add">
+        <span class="manage-add-label">选中项</span>
+        目标 ID <input type="number" id="selNewId" min="1" placeholder="新 ID">
+        <button id="selRenameBtn" class="btn ghost small" type="button">改为该 ID</button>
+        <button id="selDeleteBtn" class="btn ghost small danger" type="button">删除选中</button>
+      </div>
+      <div class="manage-add">
+        <span class="manage-add-label">新增框</span>
+        ID <input type="number" id="addId" min="1">
+        X <input type="number" id="addX">
+        Y <input type="number" id="addY">
+        宽 <input type="number" id="addW">
+        高 <input type="number" id="addH">
+        <button id="addBoxBtn" class="btn primary small" type="button">添加</button>
+        <button id="clearFrameBtn" class="btn ghost small danger" type="button">清空本帧</button>
+      </div>
+      <p class="muted">单元格可直接修改，失焦即生效；勾选后可批量改 ID 或批量删除。</p>
+    </div>
+
+    <div id="manageIdsPane" hidden>
+      <div class="scope-bar">
+        <span>修改范围</span>
+        <select id="scopeMode" class="mini-select">
+          <option value="all">全部帧</option>
+          <option value="current">当前帧</option>
+          <option value="range">指定帧范围</option>
+        </select>
+        <span id="scopeRangeWrap" hidden>
+          第 <input type="number" id="scopeFrom" min="1"> 至
+          <input type="number" id="scopeTo" min="1"> 帧
+        </span>
+        <label class="checkline" style="margin-left:auto">
+          <input type="checkbox" id="scopeReplace"> 同帧已有目标 ID 时替换
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table class="mt">
+          <thead>
+            <tr><th>ID</th><th>框数</th><th>出现帧</th><th>范围内框数</th><th>改 ID</th><th>操作</th></tr>
+          </thead>
+          <tbody id="manageIdsBody"></tbody>
+        </table>
+      </div>
+      <p class="muted">「改 ID」「删除」只作用于上方所选范围；勾选「替换」时，若同一帧已存在目标 ID，会先用新 ID 替换该框。</p>
+    </div>
+    <p id="manageMsg" class="manage-msg"></p>
+  </div>
+</div>
+
+<div class="modal" id="createModal" hidden>
+  <div class="modal-box create">
+    <div class="manage-head">
+      <div>
+        <h3>新建项目</h3>
+        <p class="modal-sub">创建项目文件夹，并把视频按目标帧率抽帧</p>
+      </div>
+    </div>
+    <label class="create-field">项目名称
+      <input id="createName" class="mini-input create-input" maxlength="60" placeholder="例如：衣服跟踪 01" spellcheck="false">
+    </label>
+    <div class="create-field">视频文件
+      <div class="create-file-row">
+        <input type="file" id="createFile" accept=".mp4,video/mp4" hidden>
+        <button id="createPick" class="btn ghost small" type="button">选择视频…</button>
+        <span id="createFileName" class="create-file muted">未选择</span>
+      </div>
+    </div>
+    <label class="create-field">目标 FPS
+      <select id="createFps" class="mini-select create-input"></select>
+    </label>
+    <div class="create-actions">
+      <button id="createCancel" class="btn ghost" type="button">取消</button>
+      <button id="createConfirm" class="btn primary" type="button" disabled>创建项目</button>
+    </div>
+    <p id="createProgress" class="muted"></p>
+  </div>
+</div>
+
+<div class="modal" id="projectModal" hidden>
+  <div class="modal-box projects">
+    <div class="manage-head">
+      <div>
+        <h3>项目</h3>
+        <p class="modal-sub">启动时自动载入上次项目 · 点击任意项目即可切换</p>
+      </div>
+      <div class="project-actions">
+        <button id="projectNewBtn" class="btn primary small" type="button">新建项目</button>
+        <button id="projectClose" class="btn ghost small" type="button">关闭</button>
+      </div>
+    </div>
+    <div class="project-toolbar">
+      <input id="projectSearch" class="project-search" type="search" placeholder="搜索项目名称或 ID" spellcheck="false">
+    </div>
+    <div class="project-list" id="projectList"></div>
+    <p class="muted">新建项目会打开导入流程：选择视频 → 分帧，完成后自动切换到新项目；旧项目数据不会删除。</p>
+  </div>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-box export-box">
+    <h3>导出成功</h3>
+    <p id="modalText"></p>
+    <a id="modalLink" class="btn primary" download>下载加密压缩包</a>
+    <p class="muted">解压密码：<b>Praaloox@0#</b>（Windows 右键 → 全部解压缩 → 输入密码）</p>
+    <button id="modalClose" class="btn ghost" type="button">关闭</button>
+  </div>
+</div>
+
+<script src="app.js?v=20261122-7"></script>
+</body>
+</html>

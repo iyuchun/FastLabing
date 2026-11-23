@@ -1,0 +1,23 @@
+# 统一换行：仓库里存 LF，Windows 脚本类检出为 CRLF
+* text=auto eol=lf
+
+# Windows 批处理 / PowerShell 必须是 CRLF，否则 cmd.exe 解析可能出错
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# 二进制，不要做任何换行/文本处理
+*.exe      binary
+*.dll      binary
+*.pyd      binary
+*.pt       binary
+*.pth      binary
+*.safetensors binary
+*.gz       binary
+*.zip      binary
+*.jpg      binary
+*.jpeg     binary
+*.png      binary
+*.ico      binary
+*.woff2    binary
+*.mp4      binary

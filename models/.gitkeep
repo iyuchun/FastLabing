@@ -1,0 +1,6 @@
+这个目录放模型权重，安装脚本会自动下载：
+
+  sam2.1_hiera_tiny.pt   156,008,466 B   SAM 2.1 tiny（智能跟踪）
+  sam3.pt              3,450,062,241 B   SAM 3（AI 自动打标）
+
+两个文件都不进 git（见 .gitignore），手动获取方式见 README。
