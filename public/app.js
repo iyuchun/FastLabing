@@ -67,7 +67,13 @@ const el = {
   gpuPanel: $('gpuPanel'), gpuBadge: $('gpuBadge'), gpuName: $('gpuName'),
   gpuUtil: $('gpuUtil'), gpuMem: $('gpuMem'), gpuTemp: $('gpuTemp'), gpuBar: $('gpuBar'),
   btnProjects: $('btnProjects'), projectModal: $('projectModal'), projectClose: $('projectClose'),
-  projectNewBtn: $('projectNewBtn'), projectList: $('projectList'), projectSearch: $('projectSearch')
+  projectNewBtn: $('projectNewBtn'), projectList: $('projectList'), projectSearch: $('projectSearch'),
+  // 导入别人标注好的数据集
+  btnImportDataset: $('btnImportDataset'), projectImportBtn: $('projectImportBtn'),
+  importModal: $('importModal'), importClose: $('importClose'), importCancel: $('importCancel'),
+  importPick: $('importPick'), importFile: $('importFile'), importFileName: $('importFileName'),
+  importPassword: $('importPassword'), importName: $('importName'), importMsg: $('importMsg'),
+  importConfirm: $('importConfirm')
 };
 
 // ===================== 工具函数 =====================
@@ -751,6 +757,96 @@ el.fileInput.addEventListener('change', async (e) => {
     setStatus('');
   }
   e.target.value = '';
+});
+
+// ===================== 导入别人标注好的数据集（加密 ZIP → 项目） =====================
+let importBusy = false;
+
+function setImportMsg(text, kind) {
+  if (!el.importMsg) return;
+  el.importMsg.textContent = text || '';
+  el.importMsg.className = 'import-msg' + (kind ? ' is-' + kind : '');
+}
+
+function openImportDataset() {
+  if (importBusy) return;
+  el.projectModal.hidden = true;
+  el.importFile.value = '';
+  el.importFileName.textContent = '未选择';
+  el.importName.value = '';
+  el.importName.placeholder = '默认使用数据集来源名称';
+  el.importConfirm.disabled = true;
+  setImportMsg('');
+  el.importModal.hidden = false;
+}
+
+function closeImportDataset() {
+  if (importBusy) return;
+  el.importModal.hidden = true;
+}
+
+el.btnImportDataset.addEventListener('click', openImportDataset);
+if (el.projectImportBtn) el.projectImportBtn.addEventListener('click', openImportDataset);
+el.importClose.addEventListener('click', closeImportDataset);
+el.importCancel.addEventListener('click', closeImportDataset);
+el.importModal.addEventListener('click', (e) => {
+  if (e.target === el.importModal) closeImportDataset();
+});
+el.importPick.addEventListener('click', () => el.importFile.click());
+el.importFile.addEventListener('change', () => {
+  const f = el.importFile.files[0];
+  el.importFileName.textContent = f ? f.name : '未选择';
+  el.importConfirm.disabled = !f || importBusy;
+  setImportMsg('');
+  if (f) {
+    const base = f.name.replace(/\.zip$/i, '').replace(/^数据集[_\-\s]*/i, '').replace(/_\d{10,}$/, '');
+    el.importName.placeholder = '默认：' + (base || '导入数据集');
+  }
+});
+
+el.importConfirm.addEventListener('click', async () => {
+  const f = el.importFile.files[0];
+  if (!f || importBusy) {
+    if (!f) setImportMsg('请先选择数据集 ZIP 压缩包', 'error');
+    return;
+  }
+
+  importBusy = true;
+  el.importConfirm.disabled = true;
+  el.importClose.disabled = true;
+  el.importCancel.disabled = true;
+  el.importPick.disabled = true;
+  setImportMsg('正在上传并解压数据集，请稍候…');
+
+  const fd = new FormData();
+  fd.append('archive', f);
+  fd.append('password', el.importPassword.value || '');
+  fd.append('name', el.importName.value.trim());
+
+  try {
+    const r = await fetch('/api/import-dataset', { method: 'POST', body: fd });
+    let data = {};
+    try { data = await r.json(); } catch (_) {}
+    if (!r.ok) throw new Error(data.error || ('导入失败（HTTP ' + r.status + '）'));
+
+    setImportMsg(`导入成功：${data.frames} 帧 / ${data.boxes} 个框，正在打开项目…`, 'ok');
+    await applyProject(
+      data.projectId,
+      `已导入数据集：${data.frames} 帧 · ${data.boxes} 个框`,
+      data.name
+    );
+    if (data.categoryName) el.categoryName.value = data.categoryName;
+    el.importModal.hidden = true;
+    setStatus(`数据集导入完成：${data.frames} 帧，${data.boxes} 个标注框，可开始审查与修改`);
+  } catch (err) {
+    setImportMsg(friendlyError('导入数据集', err), 'error');
+  } finally {
+    importBusy = false;
+    el.importClose.disabled = false;
+    el.importCancel.disabled = false;
+    el.importPick.disabled = false;
+    el.importConfirm.disabled = !el.importFile.files[0];
+  }
 });
 
 el.btnExtract.addEventListener('click', async () => {
@@ -1535,6 +1631,13 @@ function markLastProject(pid) {
 
 // 载入任意项目：帧数据 + 标注 + 缩略图，整体重置界面状态
 async function applyProject(pid, statusText, name) {
+  // 切换前先把旧项目尚未落盘的修改保存掉，避免写到新项目里
+  if (!autoRunning && projectId && saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    try { await doSave(); } catch (_) {}
+  }
+
   const r = await fetch('/frames/' + encodeURIComponent(pid) + '/meta.json', { cache: 'no-store' });
   if (!r.ok) throw new Error('项目帧数据不存在');
   const m = await r.json();
@@ -1566,7 +1669,9 @@ async function applyProject(pid, statusText, name) {
 
   el.frameCountLabel.textContent = '/ ' + meta.count;
   el.frameIndex.value = currentFrame;
-  el.btnExtract.disabled = false;
+  // 导入的数据集没有原视频，不允许重新分帧（会覆盖已还原的帧）
+  el.btnExtract.disabled = !!meta.imported;
+  el.btnExtract.title = meta.imported ? '导入的数据集没有原视频，无法重新分帧；可直接审查、修改和导出' : '';
   el.btnExport.disabled = false;
   setSaveState(false);
   resetAutoForProject();

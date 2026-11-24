@@ -535,6 +535,9 @@ kbd {
 .create-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .create-actions .btn { min-width: 84px; justify-content: center; }
 #createProgress { min-height: 16px; margin: 10px 0 0; }
+.import-msg { min-height: 16px; margin: 12px 0 0; font-size: 10px; line-height: 1.6; color: var(--muted); }
+.import-msg.is-error { color: var(--danger); }
+.import-msg.is-ok { color: var(--green); }
 
 /* ---------- project modal ---------- */
 .modal-box.projects { width: min(680px, calc(100vw - 28px)); text-align: left; max-height: calc(100vh - 60px); display: flex; flex-direction: column; }

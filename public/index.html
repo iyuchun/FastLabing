@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FastLabing · 视频标注台</title>
-<link rel="stylesheet" href="style.css?v=20261122-8">
+<link rel="stylesheet" href="style.css?v=20261124-1">
 </head>
 <body>
 <script src="assets/sprite.js?v=20261122-5"></script>
@@ -38,6 +38,9 @@
       <input type="file" id="fileInput" accept=".mp4,video/mp4" hidden>
       <button id="btnProjects" class="btn ghost" type="button" title="查看并切换所有项目">
         <svg class="ic" aria-hidden="true"><use href="#i-layers"></use></svg>项目
+      </button>
+      <button id="btnImportDataset" class="btn ghost" type="button" title="一键导入别人标注好的加密数据集 ZIP，作为项目继续审查与修改">
+        <svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg>导入数据集
       </button>
       <button id="btnImport" class="btn ghost" type="button">
         <svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg>导入视频
@@ -517,6 +520,7 @@
         <p class="modal-sub">启动时自动载入上次项目 · 点击任意项目即可切换</p>
       </div>
       <div class="project-actions">
+        <button id="projectImportBtn" class="btn ghost small" type="button">导入数据集</button>
         <button id="projectNewBtn" class="btn primary small" type="button">新建项目</button>
         <button id="projectClose" class="btn ghost small" type="button">关闭</button>
       </div>
@@ -526,6 +530,36 @@
     </div>
     <div class="project-list" id="projectList"></div>
     <p class="muted">新建项目会打开导入流程：选择视频 → 分帧，完成后自动切换到新项目；旧项目数据不会删除。</p>
+  </div>
+</div>
+
+<div class="modal" id="importModal" hidden>
+  <div class="modal-box create import-box">
+    <div class="manage-head">
+      <div>
+        <h3>导入数据集</h3>
+        <p class="modal-sub">导入别人标注好的加密 ZIP（COCO 格式），自动还原为项目，可直接审查、修改和再次导出</p>
+      </div>
+      <button id="importClose" class="btn ghost small" type="button">关闭</button>
+    </div>
+    <div class="create-field">数据集压缩包
+      <div class="create-file-row">
+        <input type="file" id="importFile" accept=".zip,application/zip" hidden>
+        <button id="importPick" class="btn ghost small" type="button">选择 ZIP…</button>
+        <span id="importFileName" class="create-file muted">未选择</span>
+      </div>
+    </div>
+    <label class="create-field">解压密码
+      <input id="importPassword" class="mini-input create-input" value="Praaloox@0#" spellcheck="false" autocomplete="off">
+    </label>
+    <label class="create-field">项目名称（可选）
+      <input id="importName" class="mini-input create-input" maxlength="60" placeholder="默认使用数据集来源名称" spellcheck="false">
+    </label>
+    <p id="importMsg" class="import-msg"></p>
+    <div class="create-actions">
+      <button id="importCancel" class="btn ghost" type="button">取消</button>
+      <button id="importConfirm" class="btn primary" type="button" disabled>开始导入</button>
+    </div>
   </div>
 </div>
 
@@ -539,6 +573,6 @@
   </div>
 </div>
 
-<script src="app.js?v=20261122-7"></script>
+<script src="app.js?v=20261124-1"></script>
 </body>
 </html>

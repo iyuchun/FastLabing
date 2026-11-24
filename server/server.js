@@ -7,6 +7,7 @@ const readline = require('readline');
 const { spawn, exec } = require('child_process');
 const { extractFrames } = require('./extract');
 const { exportDataset } = require('./export');
+const { importDatasetZip } = require('./import');
 
 const { ROOT, STORAGE, FRAMES_DIR, PROJECTS_DIR, UPLOAD_DIR, EXPORT_DIR, ZIP_DIR, TMP_DIR } = require('./storage');
 
@@ -48,6 +49,43 @@ app.post('/api/upload', (req, res, next) => {
   let originalName = req.file.originalname || '';
   try { originalName = Buffer.from(originalName, 'latin1').toString('utf8'); } catch (_) {}
   res.json({ projectId: req.projectId, originalName, size: req.file.size });
+});
+
+// 导入别人导出的数据集 ZIP（COCO 格式，可加密），还原为项目
+const datasetUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const dir = path.join(TMP_DIR, 'imports');
+      fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => cb(null, 'dataset-' + genId() + '.zip')
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 * 1024 }
+});
+
+app.post('/api/import-dataset', datasetUpload.single('archive'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: '未收到数据集压缩包' });
+  let originalName = req.file.originalname || '';
+  try { originalName = Buffer.from(originalName, 'latin1').toString('utf8'); } catch (_) {}
+
+  try {
+    const result = await importDatasetZip(req.file.path, {
+      password: req.body.password,
+      name: req.body.name,
+      originalName
+    });
+    if (result.name) {
+      const map = readProjectMeta();
+      map[result.projectId] = { ...(map[result.projectId] || {}), name: result.name };
+      writeProjectMeta(map);
+    }
+    res.json(result);
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ error: e.message });
+  } finally {
+    try { fs.rmSync(req.file.path, { force: true }); } catch (_) {}
+  }
 });
 
 // 分帧

@@ -133,4 +133,4 @@ async function extractFrames(videoPath, projectId, fps) {
   return meta;
 }
 
-module.exports = { extractFrames, FRAMES_DIR };
+module.exports = { extractFrames, FRAMES_DIR, ffmpegPath, runFfmpeg, getJpegSize };
