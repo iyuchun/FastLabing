@@ -122,14 +122,31 @@ def parse_request(req):
         count = min(count, total - start + 1)
     if count < 1:
         raise RuntimeError("count 无效（需要 >=1）")
+    # 可选：只扫描指定帧（深度质检只检查有标注的帧，跳过空帧可大幅缩短耗时）
+    frame_list = None
+    raw_frames = req.get("frames")
+    if isinstance(raw_frames, list) and raw_frames:
+        vals = set()
+        for v in raw_frames:
+            try:
+                n = int(v)
+            except Exception:
+                continue
+            if n < 1 or (total > 0 and n > total):
+                continue
+            vals.add(n)
+        if vals:
+            frame_list = sorted(vals)
     return {
         "frames_dir": frames_dir,
         "start": start,
         "count": count,
+        "frames": frame_list,
         "prompt": str(req.get("prompt") or "person").strip() or "person",
         "min_score": clamp(float(req.get("minScore", 0.5)), 0.0, 1.0),
         "min_area": max(0.0, float(req.get("minArea", 0.0005))),
         "max_objects": int(clamp(int(req.get("maxObjects") or 200), 1, 2000)),
+        "crop": req.get("crop"),
         "out_path": req.get("outPath"),
         "req_id": req.get("reqId"),
     }
@@ -174,14 +191,39 @@ def main():
         send({"type": "status", "message": "模型加载完成（%.1fs），开始逐帧检测…" % load_s})
 
         paths = []
-        for i in range(p["count"]):
-            fp = os.path.join(frames_dir, "frame_%06d.jpg" % (p["start"] + i))
+        if p["frames"]:
+            frame_nums = p["frames"]
+        else:
+            frame_nums = list(range(p["start"], p["start"] + p["count"]))
+        for n in frame_nums:
+            fp = os.path.join(frames_dir, "frame_%06d.jpg" % n)
             if not os.path.isfile(fp):
                 raise RuntimeError("缺少帧文件：" + os.path.basename(fp))
             paths.append(fp)
         with Image.open(paths[0]) as im:
             W, H = im.size
         total_area = float(W) * float(H)
+
+        # 标注范围：仅在裁剪框内推理（坐标最终会还原到整帧）
+        crop_box = None
+        crop = p.get("crop")
+        if isinstance(crop, dict):
+            try:
+                cx = int(round(float(crop.get("x") or 0)))
+                cy = int(round(float(crop.get("y") or 0)))
+                cw = int(round(float(crop.get("w") or 0)))
+                ch = int(round(float(crop.get("h") or 0)))
+                if cw >= 32 and ch >= 32:
+                    cx = max(0, min(W - 32, cx))
+                    cy = max(0, min(H - 32, cy))
+                    cw = max(32, min(W - cx, cw))
+                    ch = max(32, min(H - cy, ch))
+                    crop_box = (cx, cy, cw, ch)
+            except Exception:
+                crop_box = None
+        if crop_box:
+            send({"type": "status", "message": "仅在划线区域内推理（%d×%d）…"
+                  % (crop_box[2], crop_box[3])})
 
         tracker = IoUTracker()
         frames_out = []
@@ -190,17 +232,21 @@ def main():
         for idx, fp in enumerate(paths):
             with Image.open(fp) as im:
                 image = im.convert("RGB")
+            if crop_box:
+                image = image.crop((crop_box[0], crop_box[1],
+                                    crop_box[0] + crop_box[2], crop_box[1] + crop_box[3]))
             state = processor.set_image(image)
             output = processor.set_text_prompt(prompt=p["prompt"], state=state)
             boxes = output["boxes"].detach().float().cpu().tolist()
             scores = output["scores"].detach().float().cpu().tolist()
+            ox, oy = (crop_box[0], crop_box[1]) if crop_box else (0, 0)
             dets = []
             for box, score in zip(boxes, scores):
                 if float(score) < p["min_score"]:
                     continue
                 x1, y1, x2, y2 = (float(v) for v in box[:4])
-                x1 = clamp(x1, 0.0, W - 2.0); y1 = clamp(y1, 0.0, H - 2.0)
-                x2 = clamp(x2, x1 + 2.0, float(W)); y2 = clamp(y2, y1 + 2.0, float(H))
+                x1 = clamp(x1 + ox, 0.0, W - 2.0); y1 = clamp(y1 + oy, 0.0, H - 2.0)
+                x2 = clamp(x2 + ox, x1 + 2.0, float(W)); y2 = clamp(y2 + oy, y1 + 2.0, float(H))
                 w, h = x2 - x1, y2 - y1
                 if w * h < p["min_area"] * total_area:
                     continue
@@ -212,7 +258,7 @@ def main():
             tracked = tracker.update(dets)
             for b in tracked:
                 seen_ids.add(b["id"])
-            frames_out.append({"frame": p["start"] + idx, "boxes": tracked})
+            frames_out.append({"frame": frame_nums[idx], "boxes": tracked})
             if idx == 0:
                 t_first = time.time()
             if (idx + 1) % 5 == 0 or idx == len(paths) - 1:
@@ -228,9 +274,10 @@ def main():
         box_count = sum(len(f["boxes"]) for f in frames_out)
         data = {
             "frames": frames_out,
-            "meta": {"prompt": p["prompt"], "startFrame": p["start"], "count": len(frames_out),
-                     "totalFrames": p["count"], "width": W, "height": H,
+            "meta": {"prompt": p["prompt"], "startFrame": frame_nums[0], "count": len(frame_nums),
+                     "totalFrames": len(frame_nums), "width": W, "height": H,
                      "minScore": p["min_score"], "minArea": p["min_area"],
+                     "crop": list(crop_box) if crop_box else None,
                      "backend": "sam3_image+iou_tracker",
                      "objectCount": len(seen_ids),
                      "elapsedSec": round(time.time() - t0, 1)},

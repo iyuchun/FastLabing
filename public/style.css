@@ -135,6 +135,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   font-size: 10.5px; color: var(--ink-2); padding: 4px 2px; border-radius: 4px; white-space: nowrap;
 }
 .linkbtn:hover:not(:disabled) { color: var(--blue); }
+.linkbtn.active { color: var(--blue); background: rgba(10, 132, 255, .08); }
+.linkbtn.active .ic { color: var(--blue); }
 .linkbtn:disabled { opacity: .4; cursor: not-allowed; }
 .linkbtn.danger { color: var(--danger); }
 .linkbtn.danger:hover:not(:disabled) { color: var(--danger); opacity: .8; }
@@ -328,6 +330,8 @@ kbd {
 .eyebrow::before { content: ""; width: 3px; height: 3px; border-radius: 50%; background: #c7c7cc; }
 .badge { font-size: 8.5px; color: var(--muted); background: rgba(0, 0, 0, .04); padding: 2px 6px; border-radius: 999px; white-space: nowrap; }
 .badge.blue { color: var(--blue); background: var(--blue-soft); }
+.badge.err { color: var(--danger); background: rgba(217, 58, 47, .08); }
+.badge.warn { color: #c58a00; background: rgba(197, 138, 0, .1); }
 
 .frame-big { display: flex; align-items: baseline; gap: 9px; }
 .frame-big .num { font-size: 30px; font-weight: 620; letter-spacing: -.045em; font-variant-numeric: tabular-nums; line-height: 1; }
@@ -598,6 +602,7 @@ kbd {
 }
 .auto-unit { font-size: 9.5px; color: var(--muted); }
 .auto-tip { font-size: 9px; color: var(--muted); }
+.auto-tip.warn { color: var(--danger); }
 .auto-select { height: 28px; min-width: 176px; }
 .auto-msg { min-height: 15px; margin: 10px 0 0; font-size: 10px; line-height: 1.55; color: var(--danger); }
 .auto-msg.ok { color: var(--green); }
@@ -617,6 +622,42 @@ kbd {
 .auto-stat b { font-family: var(--mono); font-size: 15px; font-weight: 560; color: var(--ink); font-variant-numeric: tabular-nums; }
 .auto-result-title { margin-top: 8px; font-size: 14px; font-weight: 620; letter-spacing: -.015em; }
 #autoParamsPane[hidden], #autoRunPane[hidden], #autoResultPane[hidden], #autoResultStats[hidden] { display: none; }
+
+/* ---------- 标注质检 ---------- */
+.qa-panel .hint { margin-bottom: 9px; }
+.qa-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.qa-btns .track-btn { margin-top: 0; height: 34px; }
+.qa-btn:disabled { cursor: not-allowed; }
+.qa-fix-btn { height: 34px; font-size: 10.5px; font-weight: 560; }
+.qa-fix-btn:not(:disabled):hover { border-color: rgba(217, 58, 47, .4); color: var(--danger); }
+.qa-deep-btn { grid-column: 1 / -1; height: 32px; font-size: 10.5px; font-weight: 560; }
+.qa-deep-btn:not(:disabled):hover { border-color: rgba(37, 99, 235, .45); color: #2563eb; }
+.qa-deep-btn.is-running { border-color: rgba(37, 99, 235, .45); color: #2563eb; }
+.qa-deep-auto { margin-top: 8px; }
+.qa-deep-msg { margin-top: 6px; font-size: 9.5px; color: var(--muted); line-height: 1.5; }
+.qa-deep-msg.is-on { color: #2563eb; }
+.qa-num-wrap { display: flex; align-items: center; gap: 6px; }
+.qa-num-wrap .auto-num { width: 66px; }
+.qa-summary { margin-top: 10px; font-size: 9.5px; color: var(--muted); line-height: 1.5; }
+.qa-summary b { color: var(--ink-2); }
+.qa-summary .is-err { color: var(--danger); font-weight: 600; }
+.qa-summary .is-warn { color: #c58a00; font-weight: 600; }
+.qa-list { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; max-height: 240px; overflow-y: auto; scrollbar-width: thin; }
+.qa-item { padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); font-size: 9.5px; }
+.qa-item.err { border-color: rgba(217, 58, 47, .25); background: rgba(217, 58, 47, .045); }
+.qa-item.warn { border-color: rgba(197, 138, 0, .25); background: rgba(197, 138, 0, .05); }
+.qa-item-head { display: flex; align-items: flex-start; gap: 6px; }
+.qa-frame { flex: none; font-family: var(--mono); font-size: 8.5px; color: var(--ink-2); padding-top: 1px; }
+.qa-text { flex: 1; min-width: 0; color: var(--ink-2); line-height: 1.45; }
+.qa-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.qa-actions button {
+  height: 22px; padding: 0 8px; border-radius: 6px;
+  border: 1px solid var(--line-strong); background: #fff;
+  font-size: 8.5px; color: var(--ink-2);
+}
+.qa-actions button:hover { border-color: rgba(0, 113, 227, .4); color: var(--blue); }
+.qa-actions button.danger:hover { border-color: rgba(217, 58, 47, .4); color: var(--danger); }
+.qa-empty { font-size: 9px; color: var(--muted); padding: 2px 0; }
 
 /* ---------- responsive ---------- */
 @media (max-width: 1240px) {

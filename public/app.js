@@ -10,6 +10,11 @@ let currentFrame = 1;
 let selectedIndex = -1;
 let undoStack = [];
 let stickyCheckedIds = [];  // 跨帧 / 跨列表重建保留的勾选 ID（跟踪任务的选择）
+let region = [];            // 划线允许区域（视频坐标，闭合多边形），空数组表示不限制
+let regionContain = 'center'; // 区域内框的判定方式：center=中心点在区域内；full=框边缘在区域内
+let regionMode = false;     // 是否正在绘制划线区域
+let regionDraft = [];       // 正在绘制的区域顶点
+let regionCursor = null;    // 划线预览光标
 const hiddenIds = new Set();  // 按 ID 隐藏，所有帧同步生效；仅前端显示，不影响保存 / 导出
 const overwriteIds = new Set();  // 勾选「覆盖」的 ID，跟踪结束后自动清空
 
@@ -22,6 +27,10 @@ const $ = (id) => document.getElementById(id);
 const el = {
   fileInput: $('fileInput'), btnImport: $('btnImport'), fpsSelect: $('fpsSelect'),
   btnExtract: $('btnExtract'), categoryName: $('categoryName'), btnExport: $('btnExport'),
+  btnRegion: $('btnRegion'), btnClearRegion: $('btnClearRegion'), regionContain: $('regionContain'),
+  qaBadge: $('qaBadge'), qaHint: $('qaHint'), qaOverlap: $('qaOverlap'),
+  btnQa: $('btnQa'), btnQaFix: $('btnQaFix'), btnQaDeep: $('btnQaDeep'), qaDeepAutoFix: $('qaDeepAutoFix'),
+  qaDeepMsg: $('qaDeepMsg'), qaSummary: $('qaSummary'), qaList: $('qaList'),
   btnUndo: $('btnUndo'), status: $('status'),
   idMode: $('idMode'), trackCount: $('trackCount'), trackFill: $('trackFill'),
   btnTrack: $('btnTrack'), trackStatus: $('trackStatus'),
@@ -133,6 +142,10 @@ function updateChrome() {
 
   el.stepImport.classList.toggle('done', !!meta);
   el.stepExport.classList.toggle('done', !el.btnExport.disabled);
+  if (el.btnQa) el.btnQa.disabled = !meta;
+  if (el.btnQaFix) el.btnQaFix.disabled = !meta;
+  updateQaDeepUI();
+  updateRegionUI();
 }
 
 function setSaveState(saving) {
@@ -241,14 +254,19 @@ function refreshIdModeUI() {
 }
 
 function snapshot() {
-  undoStack.push(JSON.stringify(annotations));
+  undoStack.push(JSON.stringify({ annotations, region, regionContain }));
   if (undoStack.length > 200) undoStack.shift();
+  invalidateQa();
 }
 
 function undo() {
   if (!undoStack.length) return;
-  annotations = JSON.parse(undoStack.pop());
+  const state = JSON.parse(undoStack.pop());
+  annotations = (state && state.annotations) || {};
+  region = Array.isArray(state && state.region) ? state.region : [];
+  regionContain = state && state.regionContain === 'full' ? 'full' : 'center';
   selectedIndex = -1;
+  invalidateQa();
   refreshAll();
   save();
 }
@@ -288,6 +306,8 @@ function draw() {
     ctx.fillText(text, b.x + 4, ly + 13);
   });
 
+  drawRegionOverlay();
+
   if (selectedIndex >= 0) {
     const b = peekBoxes(currentFrame)[selectedIndex];
     if (b) drawHandles(b, colorForId(b.id));
@@ -317,7 +337,10 @@ function drawPreview() {
   if (!drag) return;
   const x = Math.min(drag.startX, drag.curX), y = Math.min(drag.startY, drag.curY);
   const w = Math.abs(drag.curX - drag.startX), h = Math.abs(drag.curY - drag.startY);
-  ctx.lineWidth = 2; ctx.strokeStyle = '#00e676'; ctx.fillStyle = 'rgba(0,230,118,0.15)';
+  const valid = region.length < 3 || boxAllowedInRegion({ x, y, w, h }, region);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = valid ? '#00e676' : '#ff453a';
+  ctx.fillStyle = valid ? 'rgba(0,230,118,0.15)' : 'rgba(255,69,58,0.12)';
   ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
 }
 
@@ -327,6 +350,285 @@ function toCanvas(e) {
   const sx = canvas.width / rect.width;
   const sy = canvas.height / rect.height;
   return { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy };
+}
+
+// ===================== 划线区域 =====================
+function pointOnSegment(p, a, b) {
+  const cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+  if (Math.abs(cross) > 0.5) return false;
+  const dot = (p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y);
+  if (dot < -0.5) return false;
+  const len2 = (b.x - a.x) ** 2 + (b.y - a.y) ** 2;
+  return dot <= len2 + 0.5;
+}
+
+function pointInPolygon(p, poly) {
+  // 边界上的点也算在区域内
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    if (pointOnSegment(p, poly[j], poly[i])) return true;
+  }
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    if (((yi > p.y) !== (yj > p.y)) && (p.x < ((xj - xi) * (p.y - yi)) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function segmentsProperlyIntersect(a, b, c, d) {
+  const o1 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  const o2 = (b.x - a.x) * (d.y - a.y) - (b.y - a.y) * (d.x - a.x);
+  const o3 = (d.x - c.x) * (a.y - c.y) - (d.y - c.y) * (a.x - c.x);
+  const o4 = (d.x - c.x) * (b.y - c.y) - (d.y - c.y) * (b.x - c.x);
+  return ((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) &&
+    ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0));
+}
+
+function polygonSelfIntersects(poly) {
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (j === i + 1 || (i === 0 && j === n - 1)) continue;
+      if (segmentsProperlyIntersect(poly[i], poly[(i + 1) % n], poly[j], poly[(j + 1) % n])) return true;
+    }
+  }
+  return false;
+}
+
+function polygonArea(poly) {
+  let sum = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    sum += poly[j].x * poly[i].y - poly[i].x * poly[j].y;
+  }
+  return sum / 2;
+}
+
+// 框的边缘在区域内：四个角都在区域内，且没有区域边穿过框
+function boxFullyInsideRegion(b, poly) {
+  if (!poly || poly.length < 3) return true;
+  const x1 = Math.min(b.x, b.x + b.w), x2 = Math.max(b.x, b.x + b.w);
+  const y1 = Math.min(b.y, b.y + b.h), y2 = Math.max(b.y, b.y + b.h);
+  if (!(x2 > x1) || !(y2 > y1)) return false;
+  const corners = [
+    { x: x1, y: y1 }, { x: x2, y: y1 }, { x: x2, y: y2 }, { x: x1, y: y2 }
+  ];
+  if (!corners.every((p) => pointInPolygon(p, poly))) return false;
+  const edges = [
+    [corners[0], corners[1]], [corners[1], corners[2]],
+    [corners[2], corners[3]], [corners[3], corners[0]]
+  ];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b2 = poly[(i + 1) % poly.length];
+    for (const [c, d] of edges) {
+      if (segmentsProperlyIntersect(a, b2, c, d)) return false;
+    }
+  }
+  return true;
+}
+
+// 框中心点是否在区域内
+function boxCenterInRegion(b, poly) {
+  if (!poly || poly.length < 3) return true;
+  const x1 = Math.min(b.x, b.x + b.w), x2 = Math.max(b.x, b.x + b.w);
+  const y1 = Math.min(b.y, b.y + b.h), y2 = Math.max(b.y, b.y + b.h);
+  if (!(x2 > x1) || !(y2 > y1)) return false;
+  return pointInPolygon({ x: (x1 + x2) / 2, y: (y1 + y2) / 2 }, poly);
+}
+
+// 按当前判定方式判断框是否允许保留在区域内
+function boxAllowedInRegion(b, poly, mode) {
+  if (!poly || poly.length < 3) return true;
+  const m = mode || regionContain;
+  return m === 'full' ? boxFullyInsideRegion(b, poly) : boxCenterInRegion(b, poly);
+}
+
+function regionContainLabel(mode) {
+  return (mode || regionContain) === 'full' ? '框边缘在区域内' : '框中心点在区域内';
+}
+
+function normalizeRegion(raw) {
+  if (!Array.isArray(raw)) return [];
+  const pts = raw
+    .map((p) => ({ x: Number(p && p.x), y: Number(p && p.y) }))
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  return pts.length >= 3 ? pts : [];
+}
+
+function updateRegionUI() {
+  if (!el.btnRegion) return;
+  const ready = !!meta;
+  el.btnRegion.disabled = !ready;
+  el.btnRegion.classList.toggle('active', regionMode);
+  el.btnRegion.title = regionMode
+    ? '划线中：点击添加顶点，双击或回车闭合，Esc 取消'
+    : (region.length >= 3
+      ? `重新绘制允许区域（当前判定：${regionContainLabel()}，会丢弃区域外的框）`
+      : `画一个闭合区域，只有符合「${regionContainLabel()}」的框才会保留`);
+  if (el.btnClearRegion) el.btnClearRegion.disabled = !ready || region.length < 3;
+  if (el.regionContain) {
+    el.regionContain.disabled = !ready;
+    el.regionContain.value = regionContain;
+    el.regionContain.title = '划线区域内框的判定方式：一种是框中心点在区域内；另一种是框的整条边缘都在区域内';
+  }
+  updateAutoScopeUI();
+}
+
+function addRegionPoint(p) {
+  const W = canvas.width || (meta && meta.width) || 0;
+  const H = canvas.height || (meta && meta.height) || 0;
+  const pt = { x: Math.max(0, Math.min(W, p.x)), y: Math.max(0, Math.min(H, p.y)) };
+  if (regionDraft.length >= 3) {
+    const first = regionDraft[0];
+    if (Math.hypot(pt.x - first.x, pt.y - first.y) <= 14) {
+      finishRegionDraw();
+      return;
+    }
+  }
+  regionDraft.push(pt);
+  regionCursor = pt;
+  draw();
+  setStatus(`划线中：已添加 ${regionDraft.length} 个顶点，双击/回车闭合，Esc 取消`);
+}
+
+function startRegionDraw() {
+  if (!meta) return;
+  if (autoRunning) { setStatus('自动打标运行中，暂不能修改划线区域'); return; }
+  if (regionMode) { cancelRegionDraw(); return; }
+  regionMode = true;
+  regionDraft = [];
+  regionCursor = null;
+  selectedIndex = -1;
+  drag = null;
+  canvas.style.cursor = 'crosshair';
+  setStatus('划线模式：点击添加顶点，双击或回车闭合，Esc 取消');
+  updateRegionUI();
+  draw();
+}
+
+function cancelRegionDraw() {
+  if (!regionMode) return;
+  regionMode = false;
+  regionDraft = [];
+  regionCursor = null;
+  setStatus('已取消划线');
+  updateRegionUI();
+  draw();
+}
+
+function finishRegionDraw() {
+  if (!regionMode) return;
+  const pts = [];
+  for (const p of regionDraft) {
+    const last = pts[pts.length - 1];
+    if (!last || Math.hypot(p.x - last.x, p.y - last.y) > 3) pts.push(p);
+  }
+  if (pts.length >= 2) {
+    const first = pts[0], last = pts[pts.length - 1];
+    if (Math.hypot(first.x - last.x, first.y - last.y) <= 3) pts.pop();
+  }
+  if (pts.length < 3) {
+    setStatus('至少需要 3 个顶点才能形成区域，请继续点击');
+    return;
+  }
+  if (polygonSelfIntersects(pts)) {
+    setStatus('划线的边不能交叉，请重新绘制');
+    return;
+  }
+  if (Math.abs(polygonArea(pts)) < 100) {
+    setStatus('划线区域太小，请重新绘制');
+    return;
+  }
+  const outside = countBoxesOutsideRegion(pts);
+  if (outside > 0 && !confirm(`按「${regionContainLabel()}」判定，划线区域外有 ${outside} 个框将被丢弃。是否继续？`)) {
+    return;
+  }
+  snapshot();
+  region = pts.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
+  regionMode = false;
+  regionDraft = [];
+  regionCursor = null;
+  const removed = filterAnnotationsByRegion();
+  selectedIndex = -1;
+  save();
+  refreshAll();
+  setStatus(`已设置划线区域（${regionContainLabel()}）${removed ? '，丢弃 ' + removed + ' 个框' : ''}`);
+  updateRegionUI();
+}
+
+function countBoxesOutsideRegion(poly, mode) {
+  if (!poly || poly.length < 3) return 0;
+  let count = 0;
+  for (const k in annotations) {
+    const arr = annotations[k];
+    if (!Array.isArray(arr)) continue;
+    for (const b of arr) if (b && !boxAllowedInRegion(b, poly, mode)) count++;
+  }
+  return count;
+}
+
+function filterAnnotationsByRegion() {
+  if (region.length < 3) return 0;
+  let removed = 0;
+  for (const k in annotations) {
+    const arr = annotations[k];
+    if (!Array.isArray(arr)) continue;
+    const kept = arr.filter((b) => b && boxAllowedInRegion(b, region));
+    removed += arr.length - kept.length;
+    annotations[k] = kept;
+  }
+  return removed;
+}
+
+function drawRegionOverlay() {
+  if (!regionMode && region.length >= 3) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(region[0].x, region[0].y);
+    for (let i = 1; i < region.length; i++) ctx.lineTo(region[i].x, region[i].y);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(0,230,118,.055)';
+    ctx.fill();
+    ctx.strokeStyle = '#00e676';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#00e676';
+    ctx.strokeStyle = 'rgba(0,0,0,.65)';
+    ctx.lineWidth = 1;
+    for (const p of region) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if (regionMode && regionDraft.length) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(regionDraft[0].x, regionDraft[0].y);
+    for (let i = 1; i < regionDraft.length; i++) ctx.lineTo(regionDraft[i].x, regionDraft[i].y);
+    if (regionCursor) ctx.lineTo(regionCursor.x, regionCursor.y);
+    ctx.setLineDash([7, 5]);
+    ctx.strokeStyle = '#00e676';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    for (let i = 0; i < regionDraft.length; i++) {
+      const p = regionDraft[i];
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, i === 0 ? 7 : 5, 0, Math.PI * 2);
+      ctx.fillStyle = i === 0 && regionDraft.length >= 3 ? '#ffffff' : '#00e676';
+      ctx.fill();
+      ctx.strokeStyle = '#00e676';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
 }
 
 function hitHandle(b, p) {
@@ -352,6 +654,10 @@ let drag = null;
 canvas.addEventListener('mousedown', (e) => {
   if (!meta || e.button !== 0) return;
   const p = toCanvas(e);
+  if (regionMode) {
+    addRegionPoint(p);
+    return;
+  }
   const boxes = peekBoxes(currentFrame);
 
   if (selectedIndex >= 0 && boxes[selectedIndex]) {
@@ -376,43 +682,67 @@ canvas.addEventListener('mousedown', (e) => {
 });
 
 canvas.addEventListener('mousemove', (e) => {
+  if (regionMode) {
+    regionCursor = toCanvas(e);
+    draw();
+    return;
+  }
   if (!drag) { updateCursor(e); return; }
   const p = toCanvas(e);
   if (drag.mode === 'draw') {
     drag.curX = p.x; drag.curY = p.y;
     draw(); drawPreview();
   } else if (drag.mode === 'move') {
-    if (!drag.moved) { snapshot(); drag.moved = true; }
     const b = peekBoxes(currentFrame)[selectedIndex];
     if (!b) return;
-    b.x = drag.orig.x + (p.x - drag.startX);
-    b.y = drag.orig.y + (p.y - drag.startY);
+    const cand = {
+      ...drag.orig,
+      x: drag.orig.x + (p.x - drag.startX),
+      y: drag.orig.y + (p.y - drag.startY)
+    };
+    if (region.length >= 3 && !boxAllowedInRegion(cand, region)) return;
+    if (!drag.moved) { snapshot(); drag.moved = true; }
+    b.x = cand.x; b.y = cand.y;
     draw();
   } else if (drag.mode === 'resize') {
-    if (!drag.moved) { snapshot(); drag.moved = true; }
     const b = peekBoxes(currentFrame)[selectedIndex];
     if (!b) return;
-    resizeBox(b, drag.orig, drag.handle, p);
+    const cand = { ...drag.orig };
+    resizeBox(cand, drag.orig, drag.handle, p);
+    if (region.length >= 3 && !boxAllowedInRegion(cand, region)) return;
+    if (!drag.moved) { snapshot(); drag.moved = true; }
+    Object.assign(b, cand);
     draw();
   }
 });
 
 canvas.addEventListener('mouseup', () => {
+  if (regionMode) return;
   if (!drag) return;
   if (drag.mode === 'draw') {
     const x = Math.min(drag.startX, drag.curX), y = Math.min(drag.startY, drag.curY);
     const w = Math.abs(drag.curX - drag.startX), h = Math.abs(drag.curY - drag.startY);
     if (w >= 3 && h >= 3) {
-      snapshot();
       const box = { id: getNewBoxId(), x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
-      getBoxes(currentFrame).push(box);
-      selectedIndex = peekBoxes(currentFrame).length - 1;
-      refreshAll(); save();
+      if (region.length >= 3 && !boxAllowedInRegion(box, region)) {
+        setStatus(`按「${regionContainLabel()}」判定，该框不在划线区域内，本次画框已取消`);
+      } else {
+        snapshot();
+        getBoxes(currentFrame).push(box);
+        selectedIndex = peekBoxes(currentFrame).length - 1;
+        refreshAll(); save();
+      }
     }
   } else if (drag.mode === 'move' || drag.mode === 'resize') {
     if (drag.moved) {
       const b = peekBoxes(currentFrame)[selectedIndex];
-      if (b) normalizeBox(b);
+      if (b) {
+        normalizeBox(b);
+        if (region.length >= 3 && !boxAllowedInRegion(b, region)) {
+          Object.assign(b, drag.orig);
+          setStatus(`按「${regionContainLabel()}」判定，框不符合区域要求，已恢复原位`);
+        }
+      }
       refreshAll(); save();
     } else {
       refreshBoxList(); refreshSelectedPanel(); draw();
@@ -420,6 +750,17 @@ canvas.addEventListener('mouseup', () => {
   }
   drag = null;
   draw();
+});
+
+canvas.addEventListener('dblclick', (e) => {
+  if (!regionMode) return;
+  e.preventDefault();
+  if (regionDraft.length >= 2) {
+    const a = regionDraft[regionDraft.length - 1];
+    const b = regionDraft[regionDraft.length - 2];
+    if (Math.hypot(a.x - b.x, a.y - b.y) <= 10) regionDraft.pop();
+  }
+  finishRegionDraw();
 });
 
 canvas.addEventListener('mouseleave', () => {
@@ -458,6 +799,7 @@ function normalizeBox(b) {
 
 function updateCursor(e) {
   if (!meta) return;
+  if (regionMode) { canvas.style.cursor = 'crosshair'; return; }
   const p = toCanvas(e);
   const boxes = peekBoxes(currentFrame);
   if (selectedIndex >= 0 && boxes[selectedIndex] && hitHandle(boxes[selectedIndex], p) >= 0) {
@@ -720,7 +1062,9 @@ function doSave() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       categoryName: el.categoryName.value.trim() || 'object',
-      annotations
+      annotations,
+      region,
+      regionContain
     })
   }).then((r) => { if (!r.ok) throw new Error('save failed'); setSaveState(false); })
     .catch(() => setSaveState(false));
@@ -743,7 +1087,10 @@ el.fileInput.addEventListener('change', async (e) => {
     projectName = '';
     localStorage.setItem('anno_projectId', projectId);
     annotations = {}; meta = null; currentFrame = 1; selectedIndex = -1;
+    region = []; regionContain = 'center'; regionMode = false; regionDraft = []; regionCursor = null;
     undoStack = [];
+    resetQaState();
+    resetQaDeepState(true);
     el.btnExtract.disabled = false;
     el.btnExport.disabled = true;
     el.thumbStrip.innerHTML = '';
@@ -895,7 +1242,17 @@ el.btnExtract.addEventListener('click', async () => {
 
 el.btnExport.addEventListener('click', async () => {
   if (!projectId || !meta) { alert('请先导入视频并分帧'); return; }
+  const qa = runQualityCheck(true);
+  if (qa.errors || qa.warnings) {
+    const ok = confirm(
+      `质检发现 ${qa.errors} 个错误、${qa.warnings} 个提醒（重复框 / 同帧重复 ID / ID 断层跳变等）。\n` +
+      `建议先在右侧「标注质检」中定位并修正。\n\n仍要导出吗？`
+    );
+    if (!ok) { setStatus('已取消导出，请先处理质检问题'); return; }
+  }
   const catName = el.categoryName.value.trim() || 'object';
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  try { await doSave(); } catch (_) {}
   setStatus('正在导出并加密打包...');
   try {
     const r = await fetch('/api/export', {
@@ -981,6 +1338,48 @@ el.modelMode.addEventListener('click', (e) => {
 refreshTrackModelUI();
 
 el.btnUndo.addEventListener('click', undo);
+
+if (el.btnRegion) el.btnRegion.addEventListener('click', startRegionDraw);
+if (el.regionContain) {
+  el.regionContain.addEventListener('change', () => {
+    const next = el.regionContain.value === 'full' ? 'full' : 'center';
+    if (next === regionContain) return;
+    if (autoRunning) {
+      el.regionContain.value = regionContain;
+      setStatus('自动打标运行中，暂不能修改区域判定方式');
+      return;
+    }
+    if (next === 'full' && region.length >= 3) {
+      const outside = countBoxesOutsideRegion(region, 'full');
+      if (outside > 0 && !confirm(`切换为「框边缘在区域内」后，有 ${outside} 个框将被丢弃。是否继续？`)) {
+        el.regionContain.value = regionContain;
+        return;
+      }
+    }
+    snapshot();
+    regionContain = next;
+    const removed = next === 'full' ? filterAnnotationsByRegion() : 0;
+    save();
+    refreshAll();
+    setStatus(`区域判定方式已切换为「${regionContainLabel()}」${removed ? '，丢弃 ' + removed + ' 个框' : ''}`);
+  });
+}
+if (el.btnClearRegion) {
+  el.btnClearRegion.addEventListener('click', () => {
+    if (!region.length) return;
+    if (autoRunning) { setStatus('自动打标运行中，暂不能修改划线区域'); return; }
+    if (!confirm('清除划线区域？区域外已丢弃的框不会恢复。')) return;
+    snapshot();
+    region = [];
+    regionMode = false;
+    regionDraft = [];
+    regionCursor = null;
+    save();
+    refreshAll();
+    setStatus('已清除划线区域');
+    updateRegionUI();
+  });
+}
 
 el.btnApplyId.addEventListener('click', () => {
   const b = selectedIndex >= 0 ? peekBoxes(currentFrame)[selectedIndex] : null;
@@ -1157,6 +1556,7 @@ el.btnTrack.addEventListener('click', async () => {
   let processedFrames = 0;
   let writtenFrames = 0;
   let overwrittenFrames = 0;
+  let regionSkipped = 0;
   let snapshotted = false;
   let stopped = null;
 
@@ -1202,6 +1602,11 @@ el.btnTrack.addEventListener('click', async () => {
 
           const nb = { id: plan.id, x: t.x, y: t.y, w: t.w, h: t.h };
           normalizeBox(nb);
+          if (region.length >= 3 && !boxAllowedInRegion(nb, region)) {
+            regionSkipped++;
+            prev = { x: nb.x, y: nb.y, w: nb.w, h: nb.h };
+            continue;
+          }
           const arr = getBoxes(f);
           if (plan.overwrite) {
             if (!snapshotted) { snapshot(); snapshotted = true; }
@@ -1252,14 +1657,1081 @@ el.btnTrack.addEventListener('click', async () => {
     );
   } else {
     setTrackProgress(100);
+    const qa = runQualityCheck(true);
     setTrackStatus(
       '跟踪完成：' +
       (skippedFrames ? `跳过 ${skippedFrames} 帧已有标注，` : '') +
+      (regionSkipped ? `跳过 ${regionSkipped} 帧区域外结果，` : '') +
       `写入 ${writtenFrames} 帧` +
-      (overwrittenFrames ? `（覆盖 ${overwrittenFrames} 帧）` : '')
+      (overwrittenFrames ? `（覆盖 ${overwrittenFrames} 帧）` : '') +
+      ((qa.errors || qa.warnings)
+        ? `；质检发现 ${qa.errors} 个错误、${qa.warnings} 个提醒`
+        : '；质检通过')
     );
   }
 });
+
+// ===================== 标注质检 =====================
+const QA_LIST_LIMIT = 150;
+let qaIssues = [];
+let qaStats = { checked: false, errors: 0, warnings: 0, frameCount: 0, boxCount: 0, threshold: 0.7 };
+
+// AI 深度质检：服务端用 SAM3 重新检测每个框，输出「框内多人 / 框不贴合 / 框内无目标」建议
+let qaDeep = { suggestions: [], summary: null, startFrame: 0, count: 0 };
+let qaDeepJobId = null;
+let qaDeepRunning = false;
+let qaDeepPollFails = 0;
+let qaDeepPollToken = 0;
+
+function qaOverlapThreshold() {
+  const v = parseFloat(el.qaOverlap && el.qaOverlap.value);
+  if (!Number.isFinite(v)) return 0.7;
+  return Math.max(0.3, Math.min(1, v));
+}
+
+function boxArea(b) { return Math.max(0, b.w) * Math.max(0, b.h); }
+
+function boxInterArea(a, b) {
+  const ix = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const iy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  return ix > 0 && iy > 0 ? ix * iy : 0;
+}
+
+function boxIou(a, b) {
+  const inter = boxInterArea(a, b);
+  if (!inter) return 0;
+  const union = boxArea(a) + boxArea(b) - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function boxCenter(b) { return { x: b.x + b.w / 2, y: b.y + b.h / 2 }; }
+
+function resetQaState() {
+  qaIssues = [];
+  qaStats = { checked: false, errors: 0, warnings: 0, frameCount: 0, boxCount: 0, threshold: qaOverlapThreshold() };
+  if (el.qaBadge) { el.qaBadge.textContent = '未检查'; el.qaBadge.className = 'badge'; }
+  if (el.qaSummary) el.qaSummary.textContent = '';
+  if (el.qaList) el.qaList.innerHTML = '';
+}
+
+function invalidateQa() {
+  if (qaStats.checked) resetQaState();
+}
+
+// 全量质检：框重叠重复、同帧重复 ID、ID 断层 / 跳变 / 互换
+function runQualityCheck(quiet) {
+  if (!meta || !projectId) {
+    resetQaState();
+    return qaStats;
+  }
+  const threshold = qaOverlapThreshold();
+  const total = Number(meta.count) || 0;
+  const issues = [];
+  const trackFrames = new Map();
+  let boxCount = 0;
+
+  for (let f = 1; f <= total; f++) {
+    const boxes = peekBoxes(f).filter(Boolean);
+    if (!boxes.length) continue;
+    boxCount += boxes.length;
+
+    const byId = new Map();
+    for (const b of boxes) {
+      const id = Number(b.id);
+      if (!trackFrames.has(id)) trackFrames.set(id, []);
+      trackFrames.get(id).push(f);
+      if (!byId.has(id)) byId.set(id, []);
+      byId.get(id).push(b);
+    }
+
+    // 同一帧同一 ID 出现多个框
+    for (const [id, list] of byId) {
+      if (list.length < 2) continue;
+      const sorted = list.slice().sort((a, b) => boxArea(b) - boxArea(a));
+      issues.push({
+        type: 'dupId', severity: 'error', frame: f, ids: [id],
+        text: `同一帧出现 ${list.length} 个 ID ${id} 的框，将保留最大框并删除其余 ${list.length - 1} 个`,
+        fix: { kind: 'dropBoxes', frame: f, drop: sorted.slice(1) },
+        focus: { frame: f, id }
+      });
+    }
+
+    // 不同 ID 的框重叠重复：交集 ÷ 较小框面积 >= 阈值
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i], b = boxes[j];
+        if (Number(a.id) === Number(b.id)) continue;
+        const minArea = Math.min(boxArea(a), boxArea(b));
+        const inter = boxInterArea(a, b);
+        if (minArea <= 0 || inter <= 0) continue;
+        const cover = inter / minArea;
+        if (cover < threshold) continue;
+        const small = boxArea(a) <= boxArea(b) ? a : b;
+        const big = small === a ? b : a;
+        issues.push({
+          type: 'overlap', severity: 'error', frame: f, ids: [Number(a.id), Number(b.id)],
+          text: `ID ${a.id} 与 ID ${b.id} 重叠 ${Math.round(cover * 100)}%（阈值 ${Math.round(threshold * 100)}%），疑似重复标注`,
+          fix: { kind: 'dropBoxes', frame: f, drop: [small] },
+          focus: { frame: f, id: Number(big.id) }
+        });
+      }
+    }
+  }
+
+  // 单个 ID 的跨帧一致性
+  const sortedIds = Array.from(trackFrames.keys()).sort((a, b) => a - b);
+  for (const id of sortedIds) {
+    const frames = Array.from(new Set(trackFrames.get(id))).sort((a, b) => a - b);
+    if (!frames.length) continue;
+
+    if (frames.length === 1 && total > 1) {
+      issues.push({
+        type: 'single', severity: 'warn', frame: frames[0], ids: [id],
+        text: `ID ${id} 只出现 1 帧（第 ${frames[0]} 帧），可能是漏标或错标`,
+        focus: { frame: frames[0], id }
+      });
+    }
+
+    // 中间断层：同一目标出现后应连续到消失
+    for (let k = 1; k < frames.length; k++) {
+      const gap = frames[k] - frames[k - 1] - 1;
+      if (gap <= 0) continue;
+      issues.push({
+        type: 'gap', severity: 'warn', frame: frames[k - 1] + 1, ids: [id],
+        text: `ID ${id} 在第 ${frames[k - 1] + 1}–${frames[k] - 1} 帧缺失（共 ${gap} 帧），该目标应连续存在`,
+        focus: { frame: frames[k - 1] + 1, id }
+      });
+    }
+
+    // 相邻出现帧的位移 / 尺寸突变
+    for (let k = 1; k < frames.length; k++) {
+      const f0 = frames[k - 1], f1 = frames[k];
+      const prev = boxWithId(f0, id);
+      const next = boxWithId(f1, id);
+      if (!prev || !next) continue;
+      const step = Math.max(1, f1 - f0);
+      const c0 = boxCenter(prev), c1 = boxCenter(next);
+      const dist = Math.hypot(c1.x - c0.x, c1.y - c0.y);
+      const size = Math.max(prev.w, prev.h, 1);
+      const iou0 = boxIou(prev, next);
+      const jump = step === 1
+        ? (iou0 < 0.1 && dist > 0.9 * size)
+        : (dist > 1.5 * size * step);
+      const rw = next.w / Math.max(prev.w, 1);
+      const rh = next.h / Math.max(prev.h, 1);
+      const sizeJump = rw < 0.4 || rw > 2.5 || rh < 0.4 || rh > 2.5;
+      if (!jump && !sizeJump) continue;
+      const detail = jump
+        ? `中心位移 ${Math.round(dist)}px（框 ${Math.round(prev.w)}×${Math.round(prev.h)}），疑似串到其他目标`
+        : `框尺寸突变（宽 ${Math.round(rw * 100)}%、高 ${Math.round(rh * 100)}%）`;
+      issues.push({
+        type: 'jump', severity: 'error', frame: f1, ids: [id],
+        text: `ID ${id} 从第 ${f0} 帧到第 ${f1} 帧${detail}`,
+        focus: { frame: f1, id }
+      });
+    }
+  }
+
+  // 相邻帧两个 ID 位置互换（串号）
+  const switchLastFrame = new Map();
+  for (let f = 1; f < total; f++) {
+    const cur = peekBoxes(f).filter(Boolean);
+    const nxt = peekBoxes(f + 1).filter(Boolean);
+    if (cur.length < 2 || nxt.length < 2) continue;
+    const idsCur = Array.from(new Set(cur.map((b) => Number(b.id)))).sort((a, b) => a - b);
+    const nextById = new Map();
+    for (const b of nxt) {
+      const id = Number(b.id);
+      if (!nextById.has(id)) nextById.set(id, b);
+    }
+    for (let i = 0; i < idsCur.length; i++) {
+      for (let j = i + 1; j < idsCur.length; j++) {
+        const idA = idsCur[i], idB = idsCur[j];
+        const a0 = cur.find((b) => Number(b.id) === idA);
+        const b0 = cur.find((b) => Number(b.id) === idB);
+        const a1 = nextById.get(idA), b1 = nextById.get(idB);
+        if (!a0 || !b0 || !a1 || !b1) continue;
+        const aa = boxIou(a0, a1), bb = boxIou(b0, b1);
+        const ab = boxIou(a0, b1), ba = boxIou(b0, a1);
+        if (!(ab > aa + 0.25 && ba > bb + 0.25 && ab > 0.2 && ba > 0.2)) continue;
+        const pairKey = Math.min(idA, idB) + '-' + Math.max(idA, idB);
+        const last = switchLastFrame.get(pairKey);
+        switchLastFrame.set(pairKey, f);
+        if (last != null && f - last <= 1) continue;  // 连续互换段只报一次
+        issues.push({
+          type: 'switch', severity: 'error', frame: f + 1, ids: [idA, idB],
+          text: `ID ${idA} 与 ID ${idB} 在第 ${f}→${f + 1} 帧位置互换，疑似串号`,
+          fix: { kind: 'swapIds', fromFrame: f + 1, idA, idB },
+          focus: { frame: f + 1, id: idA }
+        });
+      }
+    }
+  }
+
+  // AI 深度质检建议：框内多人 / 框不贴合 / 框内未检出
+  for (const issue of qaDeepIssues()) issues.push(issue);
+
+  issues.sort((a, b) => (a.frame - b.frame) ||
+    (a.severity === b.severity ? 0 : (a.severity === 'error' ? -1 : 1)));
+
+  qaIssues = issues;
+  qaStats = {
+    checked: true,
+    errors: issues.filter((i) => i.severity === 'error').length,
+    warnings: issues.filter((i) => i.severity === 'warn').length,
+    frameCount: total,
+    boxCount,
+    threshold
+  };
+  renderQa();
+  if (!quiet) {
+    const n = qaStats.errors + qaStats.warnings;
+    setStatus(n
+      ? `质检完成：发现 ${qaStats.errors} 个错误、${qaStats.warnings} 个提醒，可在右侧「标注质检」定位修正`
+      : `质检通过：${total} 帧、${boxCount} 个框未发现问题`);
+  }
+  return qaStats;
+}
+
+function renderQa() {
+  if (!el.qaList) return;
+  const s = qaStats;
+  if (el.qaBadge) {
+    el.qaBadge.className = 'badge' + (s.errors ? ' err' : (s.warnings ? ' warn' : ''));
+    el.qaBadge.textContent = s.errors ? s.errors + ' 个错误' : (s.warnings ? s.warnings + ' 个提醒' : '通过');
+  }
+  if (!s.checked) return;
+
+  const shown = Math.min(qaIssues.length, QA_LIST_LIMIT);
+  el.qaSummary.innerHTML =
+    `已检查 <b>${s.frameCount}</b> 帧 / <b>${s.boxCount}</b> 个框 · 重叠阈值 <b>${Math.round(s.threshold * 100)}%</b><br>` +
+    (s.errors || s.warnings
+      ? `<span class="is-err">${s.errors} 个错误</span> · <span class="is-warn">${s.warnings} 个提醒</span>` +
+        (qaIssues.length > shown ? `（仅显示前 ${shown} 条）` : '')
+      : '未发现异常');
+
+  el.qaList.innerHTML = '';
+  if (!qaIssues.length) {
+    el.qaList.innerHTML = '<div class="qa-empty">无需处理</div>';
+    return;
+  }
+  for (let i = 0; i < shown; i++) {
+    const issue = qaIssues[i];
+    const item = document.createElement('div');
+    item.className = 'qa-item ' + (issue.severity === 'error' ? 'err' : 'warn');
+    const head = document.createElement('div');
+    head.className = 'qa-item-head';
+    const fr = document.createElement('span');
+    fr.className = 'qa-frame';
+    fr.textContent = '#' + issue.frame;
+    const txt = document.createElement('span');
+    txt.className = 'qa-text';
+    txt.textContent = issue.text;
+    head.appendChild(fr);
+    head.appendChild(txt);
+    item.appendChild(head);
+
+    const acts = document.createElement('div');
+    acts.className = 'qa-actions';
+    const jump = document.createElement('button');
+    jump.type = 'button';
+    jump.textContent = '定位';
+    jump.addEventListener('click', () => focusQaIssue(issue));
+    acts.appendChild(jump);
+    if (issue.fix) {
+      const fix = document.createElement('button');
+      fix.type = 'button';
+      fix.className = 'danger';
+      fix.textContent = issue.fix.kind === 'swapIds' ? '交换此后 ID'
+        : issue.fix.kind === 'deepSplit' ? '拆分并修正 ID'
+        : issue.fix.kind === 'deepTighten' ? '收紧此框'
+        : issue.fix.kind === 'deepDrop' ? '删除非人框'
+        : '删除重复框';
+      fix.addEventListener('click', () => applyQaFix(issue));
+      acts.appendChild(fix);
+    }
+    item.appendChild(acts);
+    el.qaList.appendChild(item);
+  }
+}
+
+function focusQaIssue(issue) {
+  if (!meta || !issue || !issue.focus) return;
+  goToFrame(issue.focus.frame);
+  const arr = peekBoxes(currentFrame);
+  let idx = issue.focus.box
+    ? arr.findIndex((b) => qaDeepBoxMatch(b, issue.focus.box))
+    : -1;
+  if (idx < 0) idx = arr.findIndex((b) => b && Number(b.id) === Number(issue.focus.id));
+  if (idx < 0 && issue.fix && issue.fix.drop && issue.fix.drop[0]) {
+    const t = issue.fix.drop[0];
+    idx = arr.findIndex((b) => b && Number(b.id) === Number(t.id) &&
+      Number(b.x) === Number(t.x) && Number(b.y) === Number(t.y));
+  }
+  if (idx >= 0) {
+    selectedIndex = idx;
+    refreshBoxList();
+    refreshSelectedPanel();
+    draw();
+  }
+}
+
+function applyQaFix(issue) {
+  if (!issue || !issue.fix) return;
+  if (issue.fix.kind === 'deepSplit' || issue.fix.kind === 'deepTighten' || issue.fix.kind === 'deepDrop') {
+    applyDeepQaFix(issue);
+    return;
+  }
+  snapshot();
+  if (issue.fix.kind === 'dropBoxes') {
+    const arr = getBoxes(issue.fix.frame);
+    for (const target of issue.fix.drop) {
+      let idx = arr.findIndex((b) => b && Number(b.id) === Number(target.id) &&
+        Number(b.x) === Number(target.x) && Number(b.y) === Number(target.y) &&
+        Number(b.w) === Number(target.w) && Number(b.h) === Number(target.h));
+      if (idx < 0) idx = arr.findIndex((b) => b && Number(b.id) === Number(target.id));
+      if (idx >= 0) arr.splice(idx, 1);
+    }
+  } else if (issue.fix.kind === 'swapIds') {
+    const { fromFrame, idA, idB } = issue.fix;
+    for (const k in annotations) {
+      if (!(Number(k) >= fromFrame) || !Array.isArray(annotations[k])) continue;
+      for (const b of annotations[k]) {
+        if (!b) continue;
+        const id = Number(b.id);
+        if (id === idA) b.id = idB;
+        else if (id === idB) b.id = idA;
+      }
+    }
+  }
+  refreshAll();
+  save();
+  runQualityCheck(true);
+  setStatus('已修正：' + issue.text);
+}
+
+function boxCenterDist(a, b) {
+  const c1 = boxCenter(a), c2 = boxCenter(b);
+  return Math.hypot(c1.x - c2.x, c1.y - c2.y);
+}
+
+// ---------- AI 深度质检：建议 → 质检项 / 应用 ----------
+function qaDeepBoxMatch(a, b, tol) {
+  if (!a || !b) return false;
+  if (Number(a.id) !== Number(b.id)) return false;
+  const t = tol == null ? 8 : tol;
+  return Math.abs(Number(a.x) - Number(b.x)) <= t &&
+    Math.abs(Number(a.y) - Number(b.y)) <= t &&
+    Math.abs(Number(a.w) - Number(b.w)) <= t &&
+    Math.abs(Number(a.h) - Number(b.h)) <= t;
+}
+
+// 在帧内定位深度建议对应的框：先按原始几何精确匹配，再退回 ID
+function qaDeepFindIndex(arr, s) {
+  if (!s || !s.box) return -1;
+  if (Number.isInteger(s.boxIndex) && s.boxIndex >= 0 && s.boxIndex < arr.length &&
+    qaDeepBoxMatch(arr[s.boxIndex], s.box)) return s.boxIndex;
+  let idx = arr.findIndex((b) => qaDeepBoxMatch(b, s.box));
+  if (idx < 0) idx = arr.findIndex((b) => b && Number(b.id) === Number(s.box.id));
+  return idx;
+}
+
+function qaDeepIssues() {
+  const out = [];
+  for (const s of qaDeep.suggestions) {
+    const arr = peekBoxes(s.frame);
+    if (qaDeepFindIndex(arr, s) < 0) continue;  // 框已被改动 / 删除，建议失效
+    const id = Number(s.box && s.box.id);
+    if (s.type === 'split') {
+      out.push({
+        type: 'deepSplit', severity: 'error', frame: s.frame, ids: [id],
+        text: `第 ${s.frame} 帧 ID ${id} 的框内有 ${s.parts.length} 个人，将拆成 ${s.parts.length} 个框并按前后帧对齐 ID`,
+        fix: { kind: 'deepSplit', suggestion: s },
+        focus: { frame: s.frame, id, box: s.box }
+      });
+    } else if (s.type === 'tighten') {
+      out.push({
+        type: 'deepTighten', severity: 'warn', frame: s.frame, ids: [id],
+        text: `第 ${s.frame} 帧 ID ${id} 的框不贴合（AI 目标仅占 ${Math.round((Number(s.cover) || 0) * 100)}%），将收紧到目标边缘`,
+        fix: { kind: 'deepTighten', suggestion: s },
+        focus: { frame: s.frame, id, box: s.box }
+      });
+    } else if (s.type === 'empty') {
+      out.push({
+        type: 'deepEmpty', severity: 'error', frame: s.frame, ids: [id],
+        text: `第 ${s.frame} 帧 ID ${id} 的框内没有检出人物，将删除此框及前后帧同 ID 的框`,
+        fix: { kind: 'deepDrop', suggestion: s },
+        focus: { frame: s.frame, id, box: s.box }
+      });
+    }
+  }
+  return out;
+}
+
+function qaDeepContext() {
+  const ids = collectIds();
+  return {
+    detMap: new Map(),
+    allIds: new Set(ids),
+    nextFree: ids.length ? Math.max(...ids) + 1 : 1
+  };
+}
+
+function qaDeepAllocId(ctx) {
+  let id = ctx.nextFree;
+  while (ctx.allIds.has(id)) id++;
+  ctx.nextFree = id + 1;
+  ctx.allIds.add(id);
+  return id;
+}
+
+// 拆分多人框：原 ID 留给与旧框重叠最大的那个人，其余块优先用 AI 跟踪 detId、
+// 再参考前后帧同位置框的 ID，最后才分配新 ID，保证整段视频 ID 不跳变。
+function qaDeepApplySplit(s, ctx) {
+  const arr = getBoxes(s.frame);
+  const idx = qaDeepFindIndex(arr, s);
+  if (idx < 0) return false;
+  const orig = arr[idx];
+  const origId = Number(orig.id);
+  const used = new Set();
+  arr.forEach((b, i) => { if (i !== idx && b) used.add(Number(b.id)); });
+
+  const prevById = new Map();
+  for (const b of peekBoxes(s.frame - 1)) {
+    const id = Number(b.id);
+    if (!prevById.has(id)) prevById.set(id, b);
+  }
+  const nextById = new Map();
+  for (const b of peekBoxes(s.frame + 1)) {
+    const id = Number(b.id);
+    if (!nextById.has(id)) nextById.set(id, b);
+  }
+
+  const parts = s.parts
+    .filter((p) => !arr.some((b, i) => {
+      if (i === idx || !b) return false;
+      const inter = boxInterArea(b, p);
+      const minA = Math.min(boxArea(b), boxArea(p));
+      return minA > 0 && inter / minA >= 0.55;
+    }))
+    .map((p) => ({
+      detId: p.detId, x: p.x, y: p.y, w: p.w, h: p.h, id: null
+    }));
+  if (parts.length < 2) return false;  // 拆分目标与已有框重复，放弃拆分
+
+  // 1) 同一 AI 目标在其它帧拆分时已确定的 ID
+  for (const part of parts) {
+    if (part.detId == null) continue;
+    const id = ctx.detMap.get(part.detId);
+    if (id != null && !used.has(id)) part.id = id;
+  }
+
+  // 2) 原 ID 给与旧框重叠最大的那一块
+  if (!used.has(origId)) {
+    let best = null, bestIou = -1;
+    for (const part of parts) {
+      if (part.id != null) continue;
+      const v = boxIou(orig, part);
+      if (v > bestIou) { bestIou = v; best = part; }
+    }
+    if (best) best.id = origId;
+  }
+
+  // 3) 用前一帧 / 后一帧帮助剩余块对齐 ID
+  const matchSide = (map, taken) => {
+    const cands = [];
+    for (const part of parts) {
+      if (part.id != null) continue;
+      for (const [pid, pb] of map) {
+        if (used.has(pid) || taken.has(pid)) continue;
+        const limit = Math.max(24, 1.2 * Math.max(pb.w, pb.h, 1));
+        const dist = boxCenterDist(part, pb);
+        if (dist > limit) continue;
+        cands.push({ part, pid, score: boxIou(part, pb) + (1 - dist / limit) * 0.35 });
+      }
+    }
+    cands.sort((a, b) => b.score - a.score);
+    for (const c of cands) {
+      if (c.part.id != null || taken.has(c.pid)) continue;
+      c.part.id = c.pid;
+      taken.add(c.pid);
+    }
+  };
+  matchSide(prevById, new Set());
+  matchSide(nextById, new Set());
+
+  // 4) 剩余块分配新 ID
+  for (const part of parts) if (part.id == null) part.id = qaDeepAllocId(ctx);
+
+  // 同帧 ID 唯一性兜底
+  const seen = new Set();
+  for (const part of parts) {
+    if (seen.has(part.id)) part.id = qaDeepAllocId(ctx);
+    seen.add(part.id);
+    if (part.detId != null) ctx.detMap.set(part.detId, part.id);
+  }
+
+  arr.splice(idx, 1, ...parts.map((p) => ({ id: p.id, x: p.x, y: p.y, w: p.w, h: p.h })));
+  return true;
+}
+
+function qaDeepApplyTighten(s) {  const arr = getBoxes(s.frame);
+  const idx = qaDeepFindIndex(arr, s);
+  if (idx < 0) return false;
+  const box = arr[idx];
+  box.x = s.to.x;
+  box.y = s.to.y;
+  box.w = s.to.w;
+  box.h = s.to.h;
+  normalizeBox(box);
+  return true;
+}
+
+// 框内不是人：删除此框，并删除前后帧中同一 ID 的框，避免该 ID 继续残留
+function qaDeepApplyDrop(s) {
+  const arr = getBoxes(s.frame);
+  const idx = qaDeepFindIndex(arr, s);
+  if (idx < 0) return 0;
+  const id = Number(arr[idx].id);
+  let removed = 0;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (Number(arr[i].id) === id) { arr.splice(i, 1); removed++; }
+  }
+  const total = Number(meta && meta.count) || 0;
+  for (const f of [s.frame - 1, s.frame + 1]) {
+    if (f < 1 || (total && f > total)) continue;
+    const nb = peekBoxes(f);
+    for (let i = nb.length - 1; i >= 0; i--) {
+      if (Number(nb[i].id) === id) { nb.splice(i, 1); removed++; }
+    }
+  }
+  return removed;
+}
+
+// 所有自动修正跑完后，再兜底清一次非人 ID，防止补断层 / 校准把非人框加回来
+function qaDeepCleanupDrops(suggestions) {
+  let removed = 0;
+  const total = Number(meta && meta.count) || 0;
+  for (const s of suggestions) {
+    if (!s || s.type !== 'empty') continue;
+    const id = Number(s.box && s.box.id);
+    for (const f of [s.frame - 1, s.frame, s.frame + 1]) {
+      if (f < 1 || (total && f > total)) continue;
+      const arr = peekBoxes(f);
+      for (let i = arr.length - 1; i >= 0; i--) {
+        if (Number(arr[i].id) === id) { arr.splice(i, 1); removed++; }
+      }
+    }
+  }
+  return removed;
+}
+
+function applyDeepQaFix(issue) {
+  const s = issue && issue.fix && issue.fix.suggestion;
+  if (!s) return;
+  const arr = peekBoxes(s.frame);
+  if (qaDeepFindIndex(arr, s) < 0) {
+    setStatus('该框已被修改，深度质检建议已失效，请重新运行 AI 深度质检');
+    return;
+  }
+  snapshot();
+  let ok = false;
+  if (issue.fix.kind === 'deepSplit') ok = qaDeepApplySplit(s, qaDeepContext());
+  else if (issue.fix.kind === 'deepTighten') ok = qaDeepApplyTighten(s);
+  else if (issue.fix.kind === 'deepDrop') ok = qaDeepApplyDrop(s) > 0;
+  if (!ok) { setStatus('修正失败：未找到目标框，或拆分目标与已有框重复'); return; }
+  if (issue.fix.kind === 'deepSplit') autoReconcileIds();  // 拆分后按前后帧统一 ID
+  qaDeep.suggestions = qaDeep.suggestions.filter((x) => x !== s);
+  selectedIndex = -1;
+  refreshAll();
+  save();
+  runQualityCheck(true);
+  updateQaDeepUI();
+  setStatus('已修正：' + issue.text);
+}
+
+// ---------- AI 深度质检：任务控制 ----------
+function updateQaDeepUI() {
+  if (!el.btnQaDeep) return;
+  const span = el.btnQaDeep.querySelector('span');
+  if (span) span.textContent = qaDeepRunning ? '取消深度质检' : 'AI 深度质检';
+  el.btnQaDeep.classList.toggle('is-running', qaDeepRunning);
+  el.btnQaDeep.disabled = !meta;
+  el.btnQaDeep.title = qaDeepRunning
+    ? '点击取消正在运行的 AI 深度质检'
+    : '用 SAM 3 重新检测每个有标注的框（只扫描有框的帧）：框内多个人自动拆分，框过大 / 不贴合自动收紧，框内非人自动删除，拆分结果按前后帧对齐 ID';
+}
+
+function qaDeepSetMsg(text, on) {
+  if (!el.qaDeepMsg) return;
+  el.qaDeepMsg.textContent = text || '';
+  el.qaDeepMsg.classList.toggle('is-on', !!on);
+}
+
+function resetQaDeepState(cancelRemote) {
+  if (cancelRemote && qaDeepRunning && qaDeepJobId) {
+    fetch('/api/quality/' + encodeURIComponent(qaDeepJobId) + '/cancel', { method: 'POST' }).catch(() => {});
+  }
+  qaDeepPollToken++;
+  qaDeep = { suggestions: [], summary: null, startFrame: 0, count: 0 };
+  qaDeepJobId = null;
+  qaDeepRunning = false;
+  qaDeepPollFails = 0;
+  qaDeepSetMsg('');
+  updateQaDeepUI();
+}
+
+function qaDeepSummaryText() {
+  const s = qaDeep.summary;
+  if (!s) return '';
+  const parts = [];
+  if (s.split) parts.push(`框内多人 ${s.split}`);
+  if (s.tighten) parts.push(`框不贴合 ${s.tighten}`);
+  if (s.empty) parts.push(`框内非人 ${s.empty}`);
+  const head = `AI 深度质检：扫描 ${s.checkedFrames || 0} 个有框帧 / ${s.checkedBoxes || 0} 个框（第 ${qaDeep.startFrame}–${qaDeep.startFrame + qaDeep.count - 1} 帧）`;
+  return head + ' · ' + (parts.length ? parts.join(' · ') : '未发现多人 / 非人 / 贴合问题');
+}
+
+async function cancelQaDeepScan() {
+  const jobId = qaDeepJobId;
+  qaDeepRunning = false;
+  qaDeepJobId = null;
+  qaDeepPollToken++;
+  updateQaDeepUI();
+  qaDeepSetMsg('深度质检已取消。');
+  if (jobId) {
+    try {
+      await fetch('/api/quality/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' });
+    } catch (_) {}
+  }
+}
+
+async function startQaDeepScan() {
+  if (!meta || !projectId) { setStatus('请先导入视频并分帧'); return; }
+  if (autoRunning) { setStatus('AI 自动打标运行中，请完成后再做深度质检'); return; }
+
+  const frames = Object.keys(annotations)
+    .filter((k) => (annotations[k] || []).length)
+    .map((k) => Math.round(Number(k)))
+    .filter((f) => f >= 1);
+  if (!frames.length) {
+    setStatus('还没有任何标注框，无法做深度质检');
+    qaDeepSetMsg('还没有标注框：先自动打标或手动画框，再做 AI 深度质检。');
+    return;
+  }
+  const total = Number(meta.count) || 0;
+  const startFrame = Math.max(1, Math.min(total, Math.min(...frames)));
+  const count = Math.max(1, Math.min(total, Math.max(...frames)) - startFrame + 1);
+  const prompt = String((autoEl.prompt && autoEl.prompt.value) || 'person').trim() || 'person';
+
+  const submitPid = projectId;
+  qaDeepRunning = true;
+  qaDeepPollFails = 0;
+  qaDeepPollToken++;
+  qaDeep.suggestions = [];
+  qaDeep.summary = null;
+  qaDeep.startFrame = startFrame;
+  qaDeep.count = count;
+  updateQaDeepUI();
+  qaDeepSetMsg(`正在提交深度质检任务（仅扫描 ${frames.length} 个有框帧，第 ${startFrame}–${startFrame + count - 1} 帧）…`, true);
+
+  // 先把本地未落盘的标注同步给服务端，避免按旧标注生成建议
+  try {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    setSaveState(true);
+    await doSave();
+  } catch (_) {}
+  if (projectId !== submitPid || !qaDeepRunning) return;
+
+  let data = null;
+  try {
+    const r = await fetch('/api/quality/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: submitPid, startFrame, count, frames, prompt })
+    });
+    data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((data && data.error) || ('HTTP ' + r.status));
+  } catch (err) {
+    qaDeepRunning = false;
+    qaDeepJobId = null;
+    updateQaDeepUI();
+    qaDeepSetMsg('深度质检启动失败：' + (err && err.message ? err.message : err));
+    setStatus('AI 深度质检启动失败');
+    return;
+  }
+  if (!data || !data.jobId) {
+    qaDeepRunning = false;
+    updateQaDeepUI();
+    qaDeepSetMsg('后端未返回任务 ID，请检查服务端 /api/quality/scan');
+    return;
+  }
+  if (projectId !== submitPid || !qaDeepRunning) return;
+  qaDeepJobId = data.jobId;
+  pollQaDeepJob(data.jobId, submitPid);
+}
+
+function finishQaDeepScan(job, pid) {
+  const token = qaDeepPollToken;
+  qaDeepRunning = false;
+  qaDeepJobId = null;
+  updateQaDeepUI();
+  if (token !== qaDeepPollToken || projectId !== pid) return;
+
+  if (job && job.status === 'done') {
+    qaDeep.suggestions = Array.isArray(job.suggestions) ? job.suggestions : [];
+    qaDeep.summary = job.summary || null;
+    if (job.startFrame) qaDeep.startFrame = Number(job.startFrame);
+    if (job.count) qaDeep.count = Number(job.count);
+    updateQaDeepUI();
+    qaDeepSetMsg(qaDeepSummaryText(), true);
+    const qa = runQualityCheck(true);
+    if (el.qaDeepAutoFix && el.qaDeepAutoFix.checked && qa.errors + qa.warnings > 0) {
+      autoFixAllIssues({ silent: true });
+      return;
+    }
+    setStatus(`AI 深度质检完成：发现 ${(job.summary && job.summary.split) || 0} 处框内多人、` +
+      `${(job.summary && job.summary.tighten) || 0} 处框不贴合、${(job.summary && job.summary.empty) || 0} 处框内非人（将删除）；` +
+      `质检共 ${qa.errors} 个错误、${qa.warnings} 个提醒，可点「一键修正全部」`);
+  } else {
+    const msg = (job && (job.error || job.message)) || '深度质检失败';
+    updateQaDeepUI();
+    qaDeepSetMsg('深度质检失败：' + msg);
+    setStatus('AI 深度质检失败：' + msg);
+  }
+}
+
+async function pollQaDeepJob(jobId, pid) {
+  const token = qaDeepPollToken;
+  while (qaDeepRunning && qaDeepJobId === jobId && qaDeepPollToken === token && projectId === pid) {
+    await sleep(1200);
+    if (!qaDeepRunning || qaDeepJobId !== jobId || qaDeepPollToken !== token || projectId !== pid) return;
+
+    let job = null;
+    const ctrl = new AbortController();
+    const abortTimer = setTimeout(() => ctrl.abort(), 20000);
+    try {
+      const r = await fetch('/api/quality/' + encodeURIComponent(jobId), { cache: 'no-store', signal: ctrl.signal });
+      if (!qaDeepRunning || qaDeepJobId !== jobId || qaDeepPollToken !== token) return;
+      if (r.status === 404) {
+        finishQaDeepScan({ status: 'error', error: '任务不存在或已丢失（服务可能已重启）' }, pid);
+        return;
+      }
+      job = await r.json();
+      if (!r.ok) throw new Error((job && job.error) || ('HTTP ' + r.status));
+    } catch (err) {
+      if (!qaDeepRunning || qaDeepJobId !== jobId || projectId !== pid) return;
+      qaDeepPollFails++;
+      if (qaDeepPollFails >= 20) {
+        finishQaDeepScan({ status: 'error', error: '无法获取任务进度：' + (err && err.message ? err.message : err) }, pid);
+        return;
+      }
+      qaDeepSetMsg(`与服务连接中断，正在重试（${qaDeepPollFails}/20）…`, true);
+      continue;
+    } finally {
+      clearTimeout(abortTimer);
+    }
+    if (!qaDeepRunning || qaDeepJobId !== jobId || qaDeepPollToken !== token) return;
+    qaDeepPollFails = 0;
+    if (!job || !job.status) {
+      finishQaDeepScan({ status: 'error', error: '任务状态丢失（服务可能已重启）' }, pid);
+      return;
+    }
+    if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
+      finishQaDeepScan(job, pid);
+      return;
+    }
+    qaDeepSetMsg(`深度质检中 ${Number(job.progress) || 0} / ${Number(job.total) || qaDeep.count} 帧 · ` +
+      (job.message || '正在检测…'), true);
+  }
+}
+
+if (el.btnQaDeep) {
+  el.btnQaDeep.addEventListener('click', () => {
+    if (qaDeepRunning) cancelQaDeepScan();
+    else startQaDeepScan();
+  });
+}
+if (el.qaDeepAutoFix) {
+  if (localStorage.getItem('anno_qaDeepAutoFix') === '0') el.qaDeepAutoFix.checked = false;
+  el.qaDeepAutoFix.addEventListener('change', () => {
+    localStorage.setItem('anno_qaDeepAutoFix', el.qaDeepAutoFix.checked ? '1' : '0');
+  });
+}
+
+// 自动删除：同帧重复 ID 保留最大框；不同 ID 重叠达到阈值删除较小框
+function autoRemoveDuplicates() {
+  const threshold = qaOverlapThreshold();
+  const total = Number(meta && meta.count) || 0;
+  let removed = 0;
+  for (let f = 1; f <= total; f++) {
+    const arr = peekBoxes(f);
+    if (!arr.length) continue;
+    const drop = new Set();
+
+    const byId = new Map();
+    for (const b of arr) {
+      const id = Number(b.id);
+      if (!byId.has(id)) byId.set(id, []);
+      byId.get(id).push(b);
+    }
+    for (const list of byId.values()) {
+      if (list.length < 2) continue;
+      const sorted = list.slice().sort((a, b) => boxArea(b) - boxArea(a));
+      for (let i = 1; i < sorted.length; i++) drop.add(sorted[i]);
+    }
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let i = 0; i < arr.length; i++) {
+        const a = arr[i];
+        if (drop.has(a)) continue;
+        for (let j = i + 1; j < arr.length; j++) {
+          const b = arr[j];
+          if (drop.has(b) || Number(a.id) === Number(b.id)) continue;
+          const minArea = Math.min(boxArea(a), boxArea(b));
+          if (minArea <= 0) continue;
+          if (boxInterArea(a, b) / minArea < threshold) continue;
+          if (boxArea(a) < boxArea(b)) drop.add(a);
+          else drop.add(b);
+          changed = true;
+          break;
+        }
+        if (drop.has(a)) break;
+      }
+    }
+
+    if (drop.size) {
+      annotations[String(f)] = arr.filter((b) => !drop.has(b));
+      removed += drop.size;
+    }
+  }
+  return removed;
+}
+
+// 单帧抖动：同一 ID 在第 f 帧突然远离前后两帧，用前后帧平均框拉回
+function autoRepairSingleFrameSpikes() {
+  const total = Number(meta && meta.count) || 0;
+  let fixed = 0;
+  for (const id of collectIds()) {
+    const frames = [];
+    for (let f = 1; f <= total; f++) if (boxWithId(f, id)) frames.push(f);
+    for (let k = 1; k < frames.length - 1; k++) {
+      const f0 = frames[k - 1], f1 = frames[k], f2 = frames[k + 1];
+      if (f1 - f0 !== 1 || f2 - f1 !== 1) continue;
+      const prev = boxWithId(f0, id), cur = boxWithId(f1, id), next = boxWithId(f2, id);
+      if (!prev || !cur || !next) continue;
+      const size = Math.max(prev.w, prev.h, 1);
+      const farPrev = boxIou(prev, cur) < 0.05 && boxCenterDist(prev, cur) > size;
+      const farNext = boxIou(next, cur) < 0.05 && boxCenterDist(next, cur) > size;
+      const endsClose = boxIou(prev, next) > 0.1 || boxCenterDist(prev, next) < 0.8 * size;
+      if (!(farPrev && farNext && endsClose)) continue;
+      cur.x = Math.round((prev.x + next.x) / 2);
+      cur.y = Math.round((prev.y + next.y) / 2);
+      cur.w = Math.max(1, Math.round((prev.w + next.w) / 2));
+      cur.h = Math.max(1, Math.round((prev.h + next.h) / 2));
+      normalizeBox(cur);
+      fixed++;
+    }
+  }
+  return fixed;
+}
+
+// 以前一帧为基准做连续性核验：纠正 ID 跳变 / 串号 / 丢人后换新 ID
+function autoReconcileIds() {
+  const total = Number(meta && meta.count) || 0;
+  const allIds = new Set(collectIds());
+  let nextFree = allIds.size ? Math.max(...allIds) + 1 : 1;
+  let fixed = 0;
+
+  for (let f = 2; f <= total; f++) {
+    const prevBoxes = peekBoxes(f - 1);
+    const curBoxes = peekBoxes(f);
+    if (!prevBoxes.length || !curBoxes.length) continue;
+
+    const prevById = new Map();
+    for (const b of prevBoxes) {
+      const id = Number(b.id);
+      if (!prevById.has(id)) prevById.set(id, b);
+    }
+
+    const cands = [];
+    for (const [pid, pb] of prevById) {
+      const size = Math.max(pb.w, pb.h, 1);
+      const limit = Math.max(24, 1.2 * size);
+      for (let i = 0; i < curBoxes.length; i++) {
+        const dist = boxCenterDist(pb, curBoxes[i]);
+        if (dist > limit) continue;
+        cands.push({ pid, i, score: boxIou(pb, curBoxes[i]) + (1 - dist / limit) * 0.35 });
+      }
+    }
+    if (!cands.length) continue;
+    cands.sort((a, b) => b.score - a.score);
+
+    const usedPid = new Set();
+    const assigned = new Map();  // 当前帧框下标 -> 上一帧对应 ID
+    for (const c of cands) {
+      if (usedPid.has(c.pid) || assigned.has(c.i)) continue;
+      usedPid.add(c.pid);
+      assigned.set(c.i, c.pid);
+    }
+    if (!assigned.size) continue;
+
+    for (const [i, pid] of assigned) {
+      if (Number(curBoxes[i].id) !== pid) {
+        curBoxes[i].id = pid;
+        fixed++;
+      }
+    }
+
+    // 未被匹配、却与已匹配框撞 ID 的，换一个新 ID，避免同帧重复
+    const seen = new Set(assigned.values());
+    for (let i = 0; i < curBoxes.length; i++) {
+      if (assigned.has(i)) continue;
+      let id = Number(curBoxes[i].id);
+      if (seen.has(id)) {
+        while (allIds.has(nextFree) || seen.has(nextFree)) nextFree++;
+        id = nextFree;
+        curBoxes[i].id = id;
+        allIds.add(id);
+        fixed++;
+      }
+      seen.add(id);
+    }
+  }
+  return fixed;
+}
+
+// 补全短断层（默认 3 帧以内），用前后帧线性插值
+function autoFillShortGaps(maxGap) {
+  const total = Number(meta && meta.count) || 0;
+  let filled = 0;
+  for (const id of collectIds()) {
+    const frames = [];
+    for (let f = 1; f <= total; f++) if (boxWithId(f, id)) frames.push(f);
+    for (let k = 1; k < frames.length; k++) {
+      const f0 = frames[k - 1], f1 = frames[k];
+      const gap = f1 - f0 - 1;
+      if (gap <= 0 || gap > maxGap) continue;
+      const a = boxWithId(f0, id), b = boxWithId(f1, id);
+      if (!a || !b) continue;
+      for (let f = f0 + 1; f < f1; f++) {
+        const t = (f - f0) / (f1 - f0);
+        const nb = {
+          id,
+          x: Math.round(a.x + (b.x - a.x) * t),
+          y: Math.round(a.y + (b.y - a.y) * t),
+          w: Math.max(1, Math.round(a.w + (b.w - a.w) * t)),
+          h: Math.max(1, Math.round(a.h + (b.h - a.h) * t))
+        };
+        normalizeBox(nb);
+        if (!boxAllowedInRegion(nb, region, regionContain)) continue;
+        const arr = getBoxes(f);
+        if (arr.some((x) => Number(x.id) === id)) continue;
+        arr.push(nb);
+        filled++;
+      }
+    }
+  }
+  return filled;
+}
+
+function autoFixAllIssues(options) {
+  const silent = !!(options && options.silent);
+  if (!meta || !projectId) { setStatus('请先导入视频并分帧'); return; }
+  if (autoRunning) { setStatus('AI 自动打标运行中，请完成后再自动修正'); return; }
+  if (qaDeepRunning) { setStatus('AI 深度质检运行中，请等待完成后再自动修正'); return; }
+  const before = runQualityCheck(true);
+  const totalIssues = before.errors + before.warnings;
+  if (!totalIssues) { setStatus(silent ? 'AI 深度质检完成：未发现问题，无需修正' : '质检已通过，无需修正'); return; }
+  const deepList = qaDeep.suggestions.slice();  // snapshot 会清空质检态，先取出深度建议
+  const deepSplitCount = deepList.filter((s) => s.type === 'split').length;
+  const deepTightenCount = deepList.filter((s) => s.type === 'tighten').length;
+  const deepDropCount = deepList.filter((s) => s.type === 'empty').length;
+  if (!silent) {
+    const ok = confirm(
+      `将对全部帧执行自动修正：\n` +
+      `· 删除重复框和同帧重复 ID\n` +
+      `· 按前一帧对比纠正 ID 跳变 / 串号 / 丢人换号\n` +
+      `· 拉回单帧抖动、补全 3 帧以内短断层\n` +
+      (deepSplitCount ? `· 拆分 ${deepSplitCount} 个框内多人框，并按前后帧对齐 ID\n` : '') +
+      (deepTightenCount ? `· 收紧 ${deepTightenCount} 个不贴合框\n` : '') +
+      (deepDropCount ? `· 删除 ${deepDropCount} 个框内非人框（含前后帧同 ID 的框）\n` : '') +
+      `\n共 ${before.errors} 个错误、${before.warnings} 个提醒；修正可能调整部分框 ID，是否继续？`
+    );
+    if (!ok) return;
+  }
+
+  snapshot();
+  let fixed = 0;
+  let deepApplied = 0;
+  let deepDroppedBoxes = 0;
+  if (deepList.length) {
+    const ctx = qaDeepContext();
+    deepList.sort((a, b) => a.frame - b.frame);
+    // 先删非人框（含前后帧同 ID），再拆分 / 收紧，避免拆分结果被误删
+    for (const s of deepList) {
+      if (s.type !== 'empty') continue;
+      const n = qaDeepApplyDrop(s);
+      if (n > 0) { deepDroppedBoxes += n; deepApplied++; }
+    }
+    for (const s of deepList) {
+      if (s.type === 'split' && qaDeepApplySplit(s, ctx)) deepApplied++;
+      else if (s.type === 'tighten' && qaDeepApplyTighten(s)) deepApplied++;
+    }
+    qaDeep.suggestions = [];
+    qaDeep.summary = null;
+    updateQaDeepUI();
+    qaDeepSetMsg('AI 深度质检建议已全部应用。');
+  }
+  fixed += deepApplied;
+  fixed += autoRemoveDuplicates();
+  fixed += autoRepairSingleFrameSpikes();
+  fixed += autoReconcileIds();
+  fixed += autoRemoveDuplicates();
+  fixed += autoFillShortGaps(3);
+  if (deepList.length) deepDroppedBoxes += qaDeepCleanupDrops(deepList);
+
+  selectedIndex = -1;
+  hiddenIds.clear();
+  overwriteIds.clear();
+  stickyCheckedIds = [];
+  refreshAll();
+  save();
+  const after = runQualityCheck(true);
+  setStatus((silent ? 'AI 深度质检已自动修正' : '一键修正完成') + `：处理 ${fixed} 处` +
+    (deepApplied ? `（含 AI 深度修正 ${deepApplied} 处` + (deepDroppedBoxes ? `，删除 ${deepDroppedBoxes} 个非人框` : '') + '）' : '') +
+    `，剩余 ${after.errors} 个错误、${after.warnings} 个提醒`);
+}
+
+if (el.btnQaFix) {
+  el.btnQaFix.addEventListener('click', () => { autoFixAllIssues(); });
+}
+
+if (el.btnQa) {
+  el.btnQa.addEventListener('click', () => {
+    if (!meta) { setStatus('请先导入视频并分帧'); return; }
+    if (el.qaOverlap) {
+      el.qaOverlap.value = String(qaOverlapThreshold());
+      localStorage.setItem('anno_qaOverlap', String(qaOverlapThreshold()));
+    }
+    runQualityCheck(false);
+  });
+}
+if (el.qaOverlap) {
+  const savedThreshold = parseFloat(localStorage.getItem('anno_qaOverlap'));
+  if (Number.isFinite(savedThreshold)) {
+    el.qaOverlap.value = String(Math.max(0.3, Math.min(1, savedThreshold)));
+  }
+  el.qaOverlap.addEventListener('change', () => {
+    el.qaOverlap.value = String(qaOverlapThreshold());
+    localStorage.setItem('anno_qaOverlap', String(qaOverlapThreshold()));
+    invalidateQa();
+  });
+}
+resetQaState();
 
 // ===================== 批量管理 =====================
 let manageTab = 'frame';
@@ -1405,8 +2877,12 @@ el.addBoxBtn.addEventListener('click', () => {
     h: Number(el.addH.value) || 0
   };
   if (b.w <= 0 || b.h <= 0) { alert('宽和高必须大于 0'); return; }
-  snapshot();
   normalizeBox(b);
+  if (region.length >= 3 && !boxAllowedInRegion(b, region)) {
+    alert(`按「${regionContainLabel()}」判定，该框不在划线区域内，已取消添加`);
+    return;
+  }
+  snapshot();
   getBoxes(currentFrame).push(b);
   selectedIndex = peekBoxes(currentFrame).length - 1;
   refreshAll(); save();
@@ -1596,6 +3072,17 @@ document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
   const k = e.key.toLowerCase();
+  if (regionMode) {
+    if (k === 'escape') { e.preventDefault(); cancelRegionDraw(); }
+    else if (k === 'enter') { e.preventDefault(); finishRegionDraw(); }
+    else if (k === 'backspace' || k === 'delete') {
+      e.preventDefault();
+      regionDraft.pop();
+      regionCursor = null;
+      draw();
+    }
+    return;
+  }
   if (e.ctrlKey && k === 'z') { e.preventDefault(); undo(); }
   else if (k === 'arrowleft' || k === 'a') { e.preventDefault(); goToFrame(currentFrame - 1); }
   else if (k === 'arrowright' || k === 'd') { e.preventDefault(); goToFrame(currentFrame + 1); }
@@ -1652,6 +3139,11 @@ async function applyProject(pid, statusText, name) {
   projectId = pid;
   projectName = name || '';
   annotations = data.annotations || {};
+  region = normalizeRegion(data.region);
+  regionContain = data.regionContain === 'full' ? 'full' : 'center';
+  regionMode = false;
+  regionDraft = [];
+  regionCursor = null;
   projectFolder = data.folder || '';
   if (data.categoryName) el.categoryName.value = data.categoryName;
   stickyCheckedIds = [];
@@ -1664,6 +3156,8 @@ async function applyProject(pid, statusText, name) {
   selectedIndex = -1;
   undoStack = [];
   drag = null;
+  resetQaState();
+  resetQaDeepState(true);
   localStorage.setItem('anno_projectId', pid);
   markLastProject(pid);
 
@@ -1678,6 +3172,7 @@ async function applyProject(pid, statusText, name) {
   rebuildThumbs();
   refreshAll();
   loadFrame();
+  runQualityCheck(true);
   setStatus(statusText || '已载入项目：' + pid);
   resumeAutoFromServer();
 }
@@ -1851,6 +3346,7 @@ function resetToEmpty() {
   projectFolder = '';
   meta = null;
   annotations = {};
+  region = []; regionContain = 'center'; regionMode = false; regionDraft = []; regionCursor = null;
   stickyCheckedIds = [];
   hiddenIds.clear();
   overwriteIds.clear();
@@ -1858,6 +3354,8 @@ function resetToEmpty() {
   selectedIndex = -1;
   undoStack = [];
   drag = null;
+  resetQaState();
+  resetQaDeepState(true);
   localStorage.removeItem('anno_projectId');
   el.thumbStrip.innerHTML = '';
   el.boxList.innerHTML = '';
@@ -1902,7 +3400,8 @@ const autoEl = {
   modal: $('autoModal'), close: $('autoClose'),
   params: $('autoParamsPane'), start: $('btnAutoStart'), closeParams: $('btnAutoCloseParams'),
   prompt: $('autoPrompt'), score: $('autoScore'), scoreVal: $('autoScoreVal'),
-  minArea: $('autoMinArea'), mode: $('autoMode'), range: $('autoRange'), msg: $('autoMsg'),
+  minArea: $('autoMinArea'), mode: $('autoMode'), range: $('autoRange'),
+  scope: $('autoScope'), scopeTip: $('autoScopeTip'), msg: $('autoMsg'),
   running: $('autoRunPane'), progress: $('autoProgress'), status: $('autoStatus'),
   progressText: $('autoProgressText'), found: $('autoFound'), runPrompt: $('autoRunPrompt'),
   cancel: $('btnAutoCancel'),
@@ -2039,9 +3538,37 @@ function setAutoProgressText(done, total) {
   if (autoEl.progressText) autoEl.progressText.textContent = (done || 0) + ' / ' + (total || 0) + ' 帧';
 }
 
+// 标注范围：与工具栏「区域判定」同一个规则，AI 只在划线区域内推理
+function updateAutoScopeUI() {
+  if (!autoEl.scope) return;
+  const hasRegion = region.length >= 3;
+  autoEl.scope.value = regionContain === 'full' ? 'full' : 'center';
+  autoEl.scope.disabled = !!autoRunning;
+  if (autoEl.scopeTip) {
+    autoEl.scopeTip.textContent = hasRegion
+      ? '只在划线区域内推理；' + regionContainLabel()
+      : '未划线：请先在画布上划区域，再开始自动打标';
+    autoEl.scopeTip.classList.toggle('warn', !hasRegion);
+  }
+}
+
+if (autoEl.scope) {
+  autoEl.scope.addEventListener('change', () => {
+    const next = autoEl.scope.value === 'full' ? 'full' : 'center';
+    if (next === regionContain) return;
+    regionContain = next;
+    if (el.regionContain) el.regionContain.value = next;
+    save();
+    updateRegionUI();
+    updateAutoScopeUI();
+    setStatus('区域判定方式已切换为「' + regionContainLabel() + '」，仅影响之后的新框 / AI 结果');
+  });
+}
+
 function openAutoModal() {
   if (!autoEl.modal || !projectId || !meta) return;
   setAutoMsg('');
+  updateAutoScopeUI();
   if (autoRunning) {
     if (autoLastJob) applyAutoJobProgress(autoLastJob);
     setAutoView('running');
@@ -2080,6 +3607,17 @@ async function startAutoTask() {
     return;
   }
   const mode = ['replace', 'fill', 'append'].indexOf(autoEl.mode.value) >= 0 ? autoEl.mode.value : 'replace';
+  if (region.length < 3) {
+    setAutoMsg('请先在画布上划线：AI 只在划线区域内推理（区域判定：' + regionContainLabel() + '）');
+    return;
+  }
+  const scope = 'region';
+  const regionRule = autoEl.scope && autoEl.scope.value === 'full' ? 'full' : 'center';
+  if (regionRule !== regionContain) {
+    regionContain = regionRule;
+    if (el.regionContain) el.regionContain.value = regionRule;
+    updateRegionUI();
+  }
   const fromCurrent = autoEl.range.value === 'current';
   const startFrame = fromCurrent ? Math.max(1, Math.min(meta.count, currentFrame)) : 1;
   const count = fromCurrent ? Math.max(1, meta.count - startFrame + 1) : Math.max(1, meta.count);
@@ -2114,7 +3652,8 @@ async function startAutoTask() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        projectId: submitPid, prompt, minScore, minArea, mode, startFrame, count
+        projectId: submitPid, prompt, minScore, minArea, mode, startFrame, count,
+        scope, regionContain: regionRule
       })
     });
     data = await resp.json().catch(() => ({}));
@@ -2250,8 +3789,18 @@ async function finishAutoTask(kind, job) {
       setAutoProgressText(total, total);
       if (job && typeof job.found === 'number' && autoEl.found) autoEl.found.textContent = String(job.found);
       await reloadAnnotationsAfterAuto(jumpFrame);
+      const qa = runQualityCheck(true);
       showAutoResultDone(job);
-      setStatus('AI 自动打标完成：' + autoResultSummary(job && job.result));
+      if (qa.errors || qa.warnings) {
+        autoEl.resultMsg.textContent =
+          '结果已写入当前项目。质检发现 ' + qa.errors + ' 个错误、' + qa.warnings +
+          ' 个提醒，可在右侧「标注质检」直接定位修正。';
+        setStatus('AI 自动打标完成：' + autoResultSummary(job && job.result) +
+          '；质检发现 ' + (qa.errors + qa.warnings) + ' 个问题');
+      } else {
+        autoEl.resultMsg.textContent = '结果已写入当前项目，质检通过，可直接导出或人工微调。';
+        setStatus('AI 自动打标完成：' + autoResultSummary(job && job.result) + '；质检通过');
+      }
     } else if (kind === 'cancelled') {
       setAutoStatus('任务已取消');
       await reloadAnnotationsAfterAuto(jumpFrame);

@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FastLabing · 视频标注台</title>
-<link rel="stylesheet" href="style.css?v=20261124-1">
+<link rel="stylesheet" href="style.css?v=20261125-2">
 </head>
 <body>
-<script src="assets/sprite.js?v=20261122-5"></script>
+<script src="assets/sprite.js?v=20261124-2"></script>
 
 <div class="app">
   <header class="topbar">
@@ -78,6 +78,16 @@
       <button id="btnExtract" class="linkbtn" type="button" disabled>
         <svg class="ic" aria-hidden="true"><use href="#i-film"></use></svg>分帧
       </button>
+      <button id="btnRegion" class="linkbtn" type="button" disabled title="画一个闭合区域，按「区域判定」规则过滤区域外的框">
+        <svg class="ic" aria-hidden="true"><use href="#i-polygon"></use></svg>划线
+      </button>
+      <button id="btnClearRegion" class="linkbtn danger" type="button" disabled title="清除划线区域（已丢弃的框不会恢复）">清除区域</button>
+      <label class="checkline" title="划线区域内框的判定方式：一种是框中心点在区域内；另一种是框的整条边缘都在区域内">区域判定
+        <select id="regionContain" class="mini-select">
+          <option value="center" selected>中心点在区域内</option>
+          <option value="full">框边缘在区域内</option>
+        </select>
+      </label>
       <span class="vrule"></span>
       <label class="checkline">类别名
         <input id="categoryName" class="mini-input" value="object" spellcheck="false">
@@ -274,6 +284,39 @@
           </button>
         </section>
 
+        <section class="ins-section qa-panel" id="qaPanel">
+          <div class="ins-head">
+            <span class="eyebrow">标注质检</span>
+            <span class="badge" id="qaBadge">未检查</span>
+          </div>
+          <p class="hint" id="qaHint">检查重复框、同帧重复 ID、ID 断层 / 跳变 / 互换；AI 深度质检还会检查框内是否为人、是否多人、是否贴合，并自动拆分 / 收紧 / 删除非人框、对齐前后帧 ID。</p>
+          <div class="range-row">
+            <span>重叠阈值</span>
+            <div class="qa-num-wrap">
+              <input id="qaOverlap" class="auto-num" type="number" min="0.3" max="1" step="0.05" value="0.7">
+              <span class="auto-tip">交集 ÷ 较小框面积</span>
+            </div>
+          </div>
+          <div class="qa-btns">
+            <button id="btnQa" class="track-btn qa-btn" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-check"></use></svg>
+              <span>运行质检</span>
+            </button>
+            <button id="btnQaFix" class="manage-btn qa-fix-btn" type="button" title="删除重复框，并按前一帧对比纠正 ID 跳变 / 串号 / 单帧抖动，补全短断层">
+              <span>一键修正全部</span>
+            </button>
+            <button id="btnQaDeep" class="manage-btn qa-deep-btn" type="button" title="用 SAM 3 重新检测每个框：框内多个人自动拆分，框过大 / 不贴合自动收紧，拆分结果按前后帧对齐 ID">
+              <span>AI 深度质检</span>
+            </button>
+          </div>
+          <label class="checkline qa-deep-auto" title="深度质检完成后立即自动应用全部修正：拆分多人框、收紧不贴合框、删除非人框（含前后帧同 ID）并校正 ID">
+            <input id="qaDeepAutoFix" type="checkbox" checked>扫描完成后自动修正
+          </label>
+          <div class="qa-deep-msg" id="qaDeepMsg"></div>
+          <div class="qa-summary" id="qaSummary"></div>
+          <div class="qa-list" id="qaList"></div>
+        </section>
+
         <section class="ins-section">
           <div class="ins-head">
             <span class="eyebrow">数据集</span>
@@ -366,6 +409,14 @@
             <option value="all" selected>全部帧</option>
             <option value="current">从当前帧到结尾</option>
           </select>
+        </div>
+        <div class="auto-row">
+          <span class="auto-label">标注范围</span>
+          <select id="autoScope" class="mini-select auto-select">
+            <option value="center" selected>框中心点在区域内</option>
+            <option value="full">框边缘在区域内</option>
+          </select>
+          <span class="auto-tip" id="autoScopeTip">AI 只在划线区域内推理</span>
         </div>
       </div>
       <p class="auto-msg" id="autoMsg"></p>
@@ -573,6 +624,6 @@
   </div>
 </div>
 
-<script src="app.js?v=20261124-1"></script>
+<script src="app.js?v=20261125-3"></script>
 </body>
 </html>
